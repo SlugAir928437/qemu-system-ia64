@@ -1,0 +1,12 @@
+--- tmp/qemu/configure	2026-07-02 13:17:53.008709476 +0800
++++ configure	2026-07-02 11:02:39.029797600 +0800
+@@ -2435,7 +2435,8 @@
+ # glib support probe
+ 
+ glib_req_ver=2.56
+-glib_modules=gthread-2.0
++# Limbo: no need for gthread
++#glib_modules=gthread-2.0
+ if test "$modules" = yes; then
+     glib_modules="$glib_modules gmodule-export-2.0"
+ elif test "$plugins" = "yes"; then

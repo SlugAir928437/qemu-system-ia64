@@ -1,0 +1,15 @@
+--- tmp/qemu/accel/kvm/kvm-all.c	2026-07-02 13:17:52.986709469 +0800
++++ accel/kvm/kvm-all.c	2026-07-02 11:02:38.997503200 +0800
+@@ -2344,7 +2344,12 @@
+     QLIST_INIT(&s->kvm_parked_vcpus);
+     s->fd = qemu_open_old("/dev/kvm", O_RDWR);
+     if (s->fd == -1) {
++#ifdef __LIMBO__
++         //no m specifier in android
++        fprintf(stderr, "Could not access KVM kernel module: /dev/kvm\n");
++#else
+         fprintf(stderr, "Could not access KVM kernel module: %m\n");
++#endif
+         ret = -errno;
+         goto err;
+     }

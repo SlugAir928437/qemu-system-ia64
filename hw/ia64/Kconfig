@@ -1,0 +1,43 @@
+config IA64_VPC
+    bool
+    depends on IA64
+    select GENERIC_LOADER
+    select SERIAL_MM
+    select PCI
+    select ISA_BUS
+    select ACPI
+    imply IA64_VPC_GRAPHICS
+    imply IA64_VPC_NETWORK
+    imply IA64_VPC_PS2
+    imply IA64_VPC_STORAGE
+    imply IA64_VPC_USB
+
+config IA64_VPC_GRAPHICS
+    bool
+    depends on IA64_VPC
+    select ATI_VGA
+    select VGA_PCI
+
+config IA64_VPC_NETWORK
+    bool
+    depends on IA64_VPC
+    select E1000_PCI
+
+config IA64_VPC_PS2
+    bool
+    depends on IA64_VPC
+    select PCKBD
+
+config IA64_VPC_STORAGE
+    bool
+    depends on IA64_VPC
+    select AHCI_ICH9
+    select IDE_CMD646
+    select LSI_SCSI_PCI
+
+config IA64_VPC_USB
+    bool
+    depends on IA64_VPC
+    select USB_HID
+    select USB_OHCI_PCI
+    select USB_UHCI

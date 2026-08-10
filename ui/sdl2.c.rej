@@ -1,0 +1,41 @@
+--- tmp/qemu/ui/sdl2.c	2026-07-02 13:17:53.467042946 +0800
++++ ui/sdl2.c	2026-07-02 11:02:39.112678000 +0800
+@@ -96,7 +96,16 @@
+                                          surface_width(scon->surface),
+                                          surface_height(scon->surface),
+                                          flags);
+-    scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
++
++#if defined(__LIMBO_SDL_FORCE_SOFTWARE_RENDERING__)
++    //LIMBO: We can force SOFTWARE rendering when some devices don't have HARDWARE acceleration
++    scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, SDL_RENDERER_SOFTWARE);
++#elif defined(__LIMBO_SDL_FORCE_HARDWARE_RENDERING__)
++    scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, SDL_RENDERER_ACCELERATED);
++#else
++     scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
++#endif
++
+     if (scon->opengl) {
+         scon->winctx = SDL_GL_GetCurrentContext();
+     }
+@@ -822,6 +846,7 @@
+ 
+     assert(o->type == DISPLAY_TYPE_SDL);
+ 
++#ifndef __ANDROID__
+ #ifdef __linux__
+     /* on Linux, SDL may use fbcon|directfb|svgalib when run without
+      * accessible $DISPLAY to open X11 window.  This is often the case
+@@ -837,6 +862,12 @@
+         exit(1);
+     }
+ #endif
++#else
++    if(limbo_sdl_scale_hint == 1) {
++        SDL_bool res = SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
++        LOGI("Setting SDL_HINT_RENDER_SCALE_QUALITY to %d, code = %d", limbo_sdl_scale_hint, res);
++    }
++#endif
+ 
+     if (SDL_Init(SDL_INIT_VIDEO)) {
+         fprintf(stderr, "Could not initialize SDL(%s) - exiting\n",

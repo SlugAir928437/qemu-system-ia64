@@ -1,0 +1,33 @@
+# See docs/devel/tracing.rst for syntax documentation.
+
+# arch/exception.c
+ia64_exception_raise(int cpu_index, uint32_t exception, uint64_t ip, uint64_t immediate, uint32_t slot, uint64_t isr) "cpu=%d exception=%" PRIu32 " ip=0x%016" PRIx64 " imm=0x%016" PRIx64 " slot=%" PRIu32 " isr=0x%016" PRIx64
+ia64_exception_deliver(int cpu_index, uint32_t exception, uint64_t vector, uint64_t ip, uint64_t fault_address, uint32_t slot, uint64_t isr, bool collect) "cpu=%d exception=%" PRIu32 " vector=0x%04" PRIx64 " ip=0x%016" PRIx64 " fault=0x%016" PRIx64 " slot=%" PRIu32 " isr=0x%016" PRIx64 " collect=%d"
+
+# arch/interrupt.c
+ia64_sapic_vector(int cpu_index, const char *operation, int vector) "cpu=%d operation=%s vector=%d"
+ia64_itm(int cpu_index, const char *operation, uint64_t itc, uint64_t itm, int vector) "cpu=%d operation=%s itc=0x%016" PRIx64 " itm=0x%016" PRIx64 " vector=%d"
+
+# arch/mmu.c
+ia64_mmu_purge(int cpu_index, const char *operation, uint64_t va, uint64_t page_size, uint32_t rid, uint32_t mode) "cpu=%d operation=%s va=0x%016" PRIx64 " page_size=0x%016" PRIx64 " rid=0x%06" PRIx32 " mode=%" PRIu32
+ia64_mmu_serialize(int cpu_index, uint32_t data, uint32_t instruction, uint32_t pending, bool targeted) "cpu=%d data=%" PRIu32 " instruction=%" PRIu32 " pending=%" PRIu32 " targeted=%d"
+ia64_speculative_probe_defer(int cpu_index, uint64_t ip, uint64_t va, uint32_t size) "cpu=%d ip=0x%016" PRIx64 " va=0x%016" PRIx64 " size=%" PRIu32
+
+# arch/rse.c
+ia64_rse_state(int cpu_index, const char *operation, uint64_t bsp, uint64_t bspstore, int32_t dirty, int32_t dirty_nat, int32_t clean, int32_t clean_nat, int32_t invalid, uint32_t sof) "cpu=%d operation=%s bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 " dirty=%" PRId32 "/%" PRId32 " clean=%" PRId32 "/%" PRId32 " invalid=%" PRId32 " sof=%" PRIu32
+ia64_rse_rnat_state(int cpu_index, const char *operation, uint64_t rnat, uint64_t rnat_addr, uint64_t rnat_defined, uint64_t load_rnat, uint64_t load_rnat_addr, uint64_t load_rnat_defined, bool load_rnat_valid) "cpu=%d operation=%s rnat=0x%016" PRIx64 "@0x%016" PRIx64 "/0x%016" PRIx64 " load_rnat=0x%016" PRIx64 "@0x%016" PRIx64 "/0x%016" PRIx64 " valid=%d"
+ia64_rse_pgr_nat_update(int cpu_index, const char *operation, uint64_t ip, uint32_t physical, uint64_t source, bool old_nat, bool new_nat) "cpu=%d operation=%s ip=0x%016" PRIx64 " physical=%" PRIu32 " source=0x%016" PRIx64 " nat=%d->%d"
+ia64_rse_pgr_sync_out(int cpu_index, uint64_t ip, uint32_t reg, uint32_t physical, uint64_t value, bool nat) "cpu=%d ip=0x%016" PRIx64 " reg=%" PRIu32 " physical=%" PRIu32 " value=0x%016" PRIx64 " nat=%d"
+ia64_rse_rnat_rebind(int cpu_index, uint64_t ip, uint64_t old_addr, uint64_t old_rnat, uint64_t old_defined, uint64_t new_addr) "cpu=%d ip=0x%016" PRIx64 " old=0x%016" PRIx64 "/0x%016" PRIx64 "/0x%016" PRIx64 " new=0x%016" PRIx64
+ia64_rse_rnat_store(int cpu_index, uint64_t ip, uint64_t addr, uint64_t defined, uint64_t previous, uint64_t collection) "cpu=%d ip=0x%016" PRIx64 " addr=0x%016" PRIx64 " defined=0x%016" PRIx64 " previous=0x%016" PRIx64 " collection=0x%016" PRIx64
+ia64_rse_rnat_writeback(int cpu_index, const char *operation, uint64_t ip, uint64_t addr, uint64_t value, uint64_t defined) "cpu=%d operation=%s ip=0x%016" PRIx64 " addr=0x%016" PRIx64 " value=0x%016" PRIx64 " defined=0x%016" PRIx64
+ia64_rse_rnat_shadow(int cpu_index, const char *operation, uint64_t ip, unsigned slot, uint64_t addr, uint64_t value, uint64_t defined) "cpu=%d operation=%s ip=0x%016" PRIx64 " slot=%u addr=0x%016" PRIx64 " value=0x%016" PRIx64 " defined=0x%016" PRIx64
+ia64_rse_nat_fill(int cpu_index, uint64_t ip, uint32_t physical, uint32_t virtual, uint32_t bol, uint32_t sof, uint64_t addr, uint64_t collection, uint64_t defined, uint32_t sources) "cpu=%d ip=0x%016" PRIx64 " physical=%" PRIu32 " virtual=%" PRIu32 " bol=%" PRIu32 " sof=%" PRIu32 " addr=0x%016" PRIx64 " collection=0x%016" PRIx64 " defined=0x%016" PRIx64 " sources=0x%x"
+
+# arch/pal.c
+ia64_pal_call(int cpu_index, uint64_t index, uint64_t arg0, uint64_t arg1, uint64_t arg2) "cpu=%d index=0x%03" PRIx64 " args=0x%016" PRIx64 ",0x%016" PRIx64 ",0x%016" PRIx64
+ia64_pal_return(int cpu_index, uint64_t index, int64_t status, uint64_t result1, uint32_t flags) "cpu=%d index=0x%03" PRIx64 " status=%" PRId64 " result1=0x%016" PRIx64 " flags=0x%x"
+
+# arch/fp.c
+ia64_fpswa_call(int cpu_index, uint64_t trap_type, uint64_t bundle, bool pending) "cpu=%d trap_type=%" PRIu64 " bundle=0x%016" PRIx64 " pending=%d"
+ia64_fpswa_return(int cpu_index, int64_t status, uint64_t err1, uint64_t err2, uint64_t err3) "cpu=%d status=%" PRId64 " err=0x%016" PRIx64 ",0x%016" PRIx64 ",0x%016" PRIx64

@@ -1,0 +1,14 @@
+--- tmp/qemu/meson.build	2026-07-02 13:17:53.206709535 +0800
++++ meson.build	2026-07-02 12:04:06.491066100 +0800
+@@ -3107,7 +3107,10 @@
+ subdir('tools')
+ subdir('pc-bios')
+ subdir('docs')
+-subdir('tests')
++# Android JNI builds only need the softmmu binaries/libraries.  QEMU's
++# tests/qtest/libqos targets pull in test-only headers that do not compile
++# against the Android NDK sysroot, so skip the test tree for this build.
++# subdir('tests')
+ if gtk.found()
+   subdir('po')
+ endif

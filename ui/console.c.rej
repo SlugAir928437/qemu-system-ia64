@@ -1,0 +1,14 @@
+--- tmp/qemu/ui/console.c	2026-07-02 13:17:53.467042946 +0800
++++ ui/console.c	2026-07-02 11:02:39.099193000 +0800
+@@ -41,6 +41,11 @@
+ #define DEFAULT_BACKSCROLL 512
+ #define CONSOLE_CURSOR_PERIOD 500
+ 
++#ifdef __LIMBO__
++int gui_refresh_interval_default = 30;
++int gui_refresh_interval_idle = 300;
++#endif //__LIMBO__
++
+ typedef struct TextAttributes {
+     uint8_t fgcol:4;
+     uint8_t bgcol:4;

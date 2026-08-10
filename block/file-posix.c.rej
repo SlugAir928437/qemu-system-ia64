@@ -1,0 +1,11 @@
+--- tmp/qemu/block/file-posix.c	2026-07-02 13:17:52.994042805 +0800
++++ block/file-posix.c	2026-07-02 12:33:10.194929300 +0800
+@@ -1777,7 +1777,7 @@
+     return handle_aiocb_write_zeroes(aiocb);
+ }
+ 
+-#ifndef HAVE_COPY_FILE_RANGE
++#if !defined(HAVE_COPY_FILE_RANGE) || defined(__ANDROID__)
+ static off_t copy_file_range(int in_fd, off_t *in_off, int out_fd,
+                              off_t *out_off, size_t len, unsigned int flags)
+ {
