@@ -303,6 +303,13 @@ static void cfmakeraw (struct termios *termios_p)
 #endif
 
 /* like openpty() but also makes it raw; return master fd */
+#ifdef __ANDROID__
+/* Android does not provide openpty(); stub out PTY chardev creation. */
+static int qemu_openpty_raw(int *aslave, char *pty_name)
+{
+    return -1;
+}
+#else
 static int qemu_openpty_raw(int *aslave, char *pty_name)
 {
     int amaster;
@@ -330,6 +337,7 @@ static int qemu_openpty_raw(int *aslave, char *pty_name)
 
     return amaster;
 }
+#endif /* __ANDROID__ */
 
 static void char_pty_open(Chardev *chr,
                           ChardevBackend *backend,

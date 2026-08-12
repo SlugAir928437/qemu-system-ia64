@@ -3143,8 +3143,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     /* Put the SCSI HBA on device 4. */
 #ifdef CONFIG_IA64_VPC_STORAGE
     s->lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
-    qdev_prop_set_bit(DEVICE(s->lsi_dev),
-                      "disconnect-on-data-wait", false);
+    if (object_property_find(OBJECT(s->lsi_dev), "disconnect-on-data-wait")) {
+        qdev_prop_set_bit(DEVICE(s->lsi_dev),
+                          "disconnect-on-data-wait", false);
+    }
     if (!pci_realize_and_unref(s->lsi_dev, pci_bus, errp)) {
         return false;
     }

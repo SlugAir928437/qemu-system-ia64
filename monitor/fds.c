@@ -119,6 +119,14 @@ void qmp_closefd(const char *fdname, Error **errp)
     mon_fd_t *monfd;
     int tmp_fd;
 
+#ifdef __LIMBO__
+    //FIXME: The lookup for the fd fails below
+    //  so for now we treat the fdname as the actual fd
+    int fd_tmp = atoi(fdname);
+    close(fd_tmp);
+    return;
+#endif //__LIMBO__
+
     qemu_mutex_lock(&cur_mon->mon_lock);
     QLIST_FOREACH(monfd, &cur_mon->fds, next) {
         if (strcmp(monfd->name, fdname) != 0) {
