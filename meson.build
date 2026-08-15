@@ -1948,16 +1948,10 @@ if get_option('gtk') \
              .require(pixman.found(),
                       error_message: 'cannot enable GTK if pixman is not available') \
              .allowed()
-  gtk = dependency('gtk+-3.0', version: '>=3.22.0',
+  gtk = dependency('gtk4', version: '>=4.0',
                    method: 'pkg-config',
                    required: get_option('gtk'))
   if gtk.found()
-    gtkx11 = dependency('gtk+-x11-3.0', version: '>=3.22.0',
-                        method: 'pkg-config',
-                        required: false)
-    gtk = declare_dependency(dependencies: [gtk, gtkx11],
-                             version: gtk.version())
-
     if not get_option('vte').auto() or have_system
       vte = dependency('vte-2.91',
                        method: 'pkg-config',
@@ -1969,8 +1963,8 @@ if get_option('gtk') \
 endif
 
 x11 = not_found
-if gtkx11.found()
-  x11 = dependency('x11', method: 'pkg-config', required: gtkx11.found())
+if gtk.found() or sdl.found()
+  x11 = dependency('x11', method: 'pkg-config', required: false)
 endif
 png = not_found
 if get_option('png').allowed() and have_system

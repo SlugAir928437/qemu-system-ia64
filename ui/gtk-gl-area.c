@@ -53,11 +53,11 @@ void gd_gl_area_draw(VirtualConsole *vc)
     }
 
     gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
-    gs = gdk_window_get_scale_factor(gtk_widget_get_window(vc->gfx.drawing_area));
+    gs = gtk_widget_get_scale_factor(vc->gfx.drawing_area);
     fbw = surface_width(vc->gfx.ds);
     fbh = surface_height(vc->gfx.ds);
-    ww = gtk_widget_get_allocated_width(vc->gfx.drawing_area);
-    wh = gtk_widget_get_allocated_height(vc->gfx.drawing_area);
+    ww = gtk_widget_get_width(vc->gfx.drawing_area);
+    wh = gtk_widget_get_height(vc->gfx.drawing_area);
     pw = ww * gs;
     ph = wh * gs;
 
@@ -251,13 +251,17 @@ QEMUGLContext gd_gl_area_create_context(DisplayGLCtx *dgc,
                                         QEMUGLParams *params)
 {
     VirtualConsole *vc = container_of(dgc, VirtualConsole, gfx.dgc);
-    GdkWindow *window;
+    GdkSurface *surface;
     GdkGLContext *ctx;
     GError *err = NULL;
     int major, minor;
 
-    window = gtk_widget_get_window(vc->gfx.drawing_area);
-    ctx = gdk_window_create_gl_context(window, &err);
+    surface = gtk_widget_get_native(vc->gfx.drawing_area) ?
+        gtk_native_get_surface(gtk_widget_get_native(vc->gfx.drawing_area)) : NULL;
+    if (!surface) {
+        return NULL;
+    }
+    ctx = gdk_surface_create_gl_context(surface, &err);
     if (err) {
         g_printerr("Create gdk gl context failed: %s\n", err->message);
         g_error_free(err);

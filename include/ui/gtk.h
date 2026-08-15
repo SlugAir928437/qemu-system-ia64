@@ -44,6 +44,7 @@ typedef struct VirtualGfxConsole {
     double preferred_scale;
     double scale_x;
     double scale_y;
+    bool touch_active;
 #if defined(CONFIG_OPENGL)
     QemuGLShader *gls;
     EGLContext ectx;
@@ -81,7 +82,6 @@ typedef struct VirtualConsole {
     GtkDisplayState *s;
     char *label;
     GtkWidget *window;
-    GtkWidget *menu_item;
     GtkWidget *tab_item;
     GtkWidget *focus;
     VirtualConsoleType type;
@@ -98,32 +98,11 @@ struct GtkDisplayState {
 
     GtkWidget *menu_bar;
 
-    GtkAccelGroup *accel_group;
-
-    GtkWidget *machine_menu_item;
-    GtkWidget *machine_menu;
-    GtkWidget *pause_item;
-    GtkWidget *reset_item;
-    GtkWidget *powerdown_item;
-    GtkWidget *quit_item;
-
-    GtkWidget *view_menu_item;
-    GtkWidget *view_menu;
-    GtkWidget *full_screen_item;
-    GtkWidget *copy_item;
-    GtkWidget *zoom_in_item;
-    GtkWidget *zoom_out_item;
-    GtkWidget *zoom_fixed_item;
-    GtkWidget *zoom_fit_item;
-    GtkWidget *grab_item;
-    GtkWidget *grab_on_hover_item;
+    GActionGroup *actions;
+    GMenu *view_menu;
 
     int nb_vcs;
     VirtualConsole vc[MAX_VCS];
-
-    GtkWidget *show_tabs_item;
-    GtkWidget *untabify_item;
-    GtkWidget *show_menubar_item;
 
     GtkWidget *vbox;
     GtkWidget *notebook;
@@ -145,9 +124,17 @@ struct GtkDisplayState {
 
     bool external_pause_update;
 
+    /* menu item state */
+    bool show_tabs;
+    bool show_menubar;
+    bool grab_on_hover;
+    bool grab_active;
+    bool zoom_fit_active;
+    int current_vc;
+
     QemuClipboardPeer cbpeer;
     uint32_t cbpending[QEMU_CLIPBOARD_SELECTION__COUNT];
-    GtkClipboard *gtkcb[QEMU_CLIPBOARD_SELECTION__COUNT];
+    GdkClipboard *gtkcb[QEMU_CLIPBOARD_SELECTION__COUNT];
     bool cbowner[QEMU_CLIPBOARD_SELECTION__COUNT];
 
     DisplayOptions *opts;
