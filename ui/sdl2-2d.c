@@ -34,6 +34,9 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
     SDL_Rect rect;
+    SDL_Rect dst;
+    int out_w, out_h;
+    double sx, sy, scale;
     size_t surface_data_offset;
     assert(!scon->opengl);
 
@@ -51,8 +54,23 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_UpdateTexture(scon->texture, &rect,
                       surface_data(surf) + surface_data_offset,
                       surface_stride(surf));
+
+    /* Scale the guest framebuffer to the window while preserving its aspect
+     * ratio: compute the largest centered rectangle with the guest aspect
+     * ratio (letterboxing) and render the texture into it. */
+    if (SDL_GetRendererOutputSize(scon->real_renderer, &out_w, &out_h) < 0) {
+        SDL_GetWindowSize(scon->real_window, &out_w, &out_h);
+    }
+    sx = (double)out_w / surface_width(surf);
+    sy = (double)out_h / surface_height(surf);
+    scale = MIN(sx, sy);
+    dst.w = (int)(surface_width(surf) * scale);
+    dst.h = (int)(surface_height(surf) * scale);
+    dst.x = (out_w - dst.w) / 2;
+    dst.y = (out_h - dst.h) / 2;
+
     SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
+    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
     SDL_RenderPresent(scon->real_renderer);
 }
 
@@ -84,10 +102,6 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
                 (surface_height(old_surface) != surface_height(new_surface)))) {
         sdl2_window_resize(scon);
     }
-
-    SDL_RenderSetLogicalSize(scon->real_renderer,
-                             surface_width(new_surface),
-                             surface_height(new_surface));
 
     switch (surface_format(scon->surface)) {
     case PIXMAN_x1r5g5b5:

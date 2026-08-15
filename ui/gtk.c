@@ -713,19 +713,17 @@ void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget)
 
 void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh)
 {
+    double sx, sy;
+
     if (!vc) {
         return;
     }
 
-    if (vc->s->full_screen) {
-        vc->gfx.scale_x = (double)ww / fbw;
-        vc->gfx.scale_y = (double)wh / fbh;
-    } else if (vc->s->free_scale) {
-        double sx, sy;
-
-        sx = (double)ww / fbw;
-        sy = (double)wh / fbh;
+    sx = (double)ww / fbw;
+    sy = (double)wh / fbh;
+    if (vc->s->full_screen || vc->s->free_scale) {
         if (vc->s->keep_aspect_ratio) {
+            /* Uniform scale: preserve the guest aspect ratio (letterbox). */
             vc->gfx.scale_x = vc->gfx.scale_y = MIN(sx, sy);
         } else {
             vc->gfx.scale_x = sx;
@@ -2159,6 +2157,15 @@ static void gd_vc_gfx_init(GtkDisplayState *s, VirtualConsole *vc,
     s->keep_aspect_ratio = true;
     if (s->opts->u.gtk.has_keep_aspect_ratio)
         s->keep_aspect_ratio = s->opts->u.gtk.keep_aspect_ratio;
+
+#ifdef __LIMBO__
+    /* Limbo (Android): the GTK window always covers the whole screen, so
+     * force proportional zoom-to-fit scaling regardless of the graphics
+     * device's ui_info support. */
+    s->free_scale = true;
+    s->keep_aspect_ratio = true;
+    s->zoom_fit_active = true;
+#endif
 
     for (i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
         struct touch_slot *slot = &touch_slots[i];
