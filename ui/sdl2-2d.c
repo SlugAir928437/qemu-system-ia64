@@ -34,9 +34,6 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
     SDL_Rect rect;
-    SDL_Rect dst;
-    int out_w, out_h;
-    double sx, sy, scale;
     size_t surface_data_offset;
     assert(!scon->opengl);
 
@@ -54,23 +51,11 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_UpdateTexture(scon->texture, &rect,
                       surface_data(surf) + surface_data_offset,
                       surface_stride(surf));
-
-    /* Scale the guest framebuffer to the window while preserving its aspect
-     * ratio: compute the largest centered rectangle with the guest aspect
-     * ratio (letterboxing) and render the texture into it. */
-    if (SDL_GetRendererOutputSize(scon->real_renderer, &out_w, &out_h) < 0) {
-        SDL_GetWindowSize(scon->real_window, &out_w, &out_h);
-    }
-    sx = (double)out_w / surface_width(surf);
-    sy = (double)out_h / surface_height(surf);
-    scale = MIN(sx, sy);
-    dst.w = (int)(surface_width(surf) * scale);
-    dst.h = (int)(surface_height(surf) * scale);
-    dst.x = (out_w - dst.w) / 2;
-    dst.y = (out_h - dst.h) / 2;
-
     SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
+    /* The logical size set in sdl2_2d_switch() makes SDL scale the guest
+     * framebuffer to the window while preserving its aspect ratio
+     * (letterboxing), so a NULL destination rect is scaled correctly. */
+    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
     SDL_RenderPresent(scon->real_renderer);
 }
 
@@ -102,6 +87,29 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
                 (surface_height(old_surface) != surface_height(new_surface)))) {
         sdl2_window_resize(scon);
     }
+
+#ifdef __ANDROID__
+    /* The SDL window size on Android is driven by the Java surface, not by
+     * the guest framebuffer.  Keep it in sync with the real renderer output
+     * so the letterboxing math and the input mapping always use the surface
+     * size (SDL_SetWindowSize only updates the logical window size here, the
+     * actual Android surface is unaffected). */
+    {
+        int w = 0, h = 0;
+        if (SDL_GetRendererOutputSize(scon->real_renderer, &w, &h) == 0 &&
+            w > 0 && h > 0) {
+            SDL_SetWindowSize(scon->real_window, w, h);
+        }
+    }
+#endif
+
+    /* Let SDL scale the guest framebuffer to the window while preserving its
+     * aspect ratio (letterboxing) and convert mouse events into logical
+     * (guest) coordinates.  SDL provides this on the compat layer, keeping
+     * the rendering and the input mapping consistent on every renderer. */
+    SDL_RenderSetLogicalSize(scon->real_renderer,
+                             surface_width(new_surface),
+                             surface_height(new_surface));
 
     switch (surface_format(scon->surface)) {
     case PIXMAN_x1r5g5b5:

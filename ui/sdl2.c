@@ -154,6 +154,14 @@ void sdl2_window_resize(struct sdl2_console *scon)
         return;
     }
 
+#ifdef __ANDROID__
+    /* On Android the SDL window always covers the screen and its size is
+     * reported by the Java surface (see Android_CreateWindow in the SDL2
+     * android backend).  Calling SDL_SetWindowSize() here would desync the
+     * SDL window size from the real surface size and break the letterbox
+     * rendering and the input coordinate mapping. */
+    return;
+#endif
     SDL_SetWindowSize(scon->real_window,
                       surface_width(scon->surface),
                       surface_height(scon->surface));
@@ -498,69 +506,38 @@ static void handle_textinput(SDL_Event *ev)
     }
 }
 
-/*
- * Compute the letterboxing parameters used by sdl2-2d to display the guest
- * framebuffer with its aspect ratio preserved: the top-left offset of the
- * scaled framebuffer inside the window and the uniform scale factor.
- */
-static void sdl2_window_to_surface(struct sdl2_console *scon,
-                                   int *off_x, int *off_y, double *scale)
-{
-    int scr_w, scr_h, surf_w, surf_h;
-    double sx, sy;
-
-    SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
-    if (!scon->surface || scr_w <= 0 || scr_h <= 0) {
-        *scale = 1.0;
-        *off_x = 0;
-        *off_y = 0;
-        return;
-    }
-    surf_w = surface_width(scon->surface);
-    surf_h = surface_height(scon->surface);
-    sx = (double)scr_w / surf_w;
-    sy = (double)scr_h / surf_h;
-    *scale = MIN(sx, sy);
-    *off_x = (int)((scr_w - surf_w * (*scale)) / 2);
-    *off_y = (int)((scr_h - surf_h * (*scale)) / 2);
-}
-
 static void handle_mousemotion(SDL_Event *ev)
 {
     int max_x, max_y;
     struct sdl2_console *scon = get_scon_from_window(ev->motion.windowID);
-    int scr_w, scr_h, surf_w, surf_h, x, y, dx, dy;
-    int off_x, off_y;
-    double scale;
+    int surf_w, surf_h, x, y, dx, dy;
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
 
-    SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
+    surf_w = surface_width(scon->surface);
+    surf_h = surface_height(scon->surface);
+    /* SDL converts mouse events into logical (guest) coordinates when a
+     * logical size is set (see sdl2_2d_switch), so the position and the
+     * relative deltas are already scaled for the letterboxed display. */
+    x = ev->motion.x;
+    y = ev->motion.y;
     if (qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
-        max_x = scr_w - 1;
-        max_y = scr_h - 1;
+        max_x = surf_w - 1;
+        max_y = surf_h - 1;
         if (gui_grab && !gui_fullscreen
-            && (ev->motion.x == 0 || ev->motion.y == 0 ||
-                ev->motion.x == max_x || ev->motion.y == max_y)) {
+            && (x == 0 || y == 0 || x == max_x || y == max_y)) {
             sdl_grab_end(scon);
         }
-        if (!gui_grab &&
-            (ev->motion.x > 0 && ev->motion.x < max_x &&
-             ev->motion.y > 0 && ev->motion.y < max_y)) {
+        if (!gui_grab && x > 0 && x < max_x && y > 0 && y < max_y) {
             sdl_grab_start(scon);
         }
     }
-    surf_w = surface_width(scon->surface);
-    surf_h = surface_height(scon->surface);
-    sdl2_window_to_surface(scon, &off_x, &off_y, &scale);
-    x = (int64_t)((ev->motion.x - off_x) / scale);
-    y = (int64_t)((ev->motion.y - off_y) / scale);
     x = MIN(MAX(x, 0), surf_w - 1);
     y = MIN(MAX(y, 0), surf_h - 1);
-    dx = (int64_t)(ev->motion.xrel / scale);
-    dy = (int64_t)(ev->motion.yrel / scale);
+    dx = ev->motion.xrel;
+    dy = ev->motion.yrel;
     if (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
         sdl_send_mouse_event(scon, dx, dy, x, y, ev->motion.state);
     }
@@ -572,19 +549,16 @@ static void handle_mousebutton(SDL_Event *ev)
     SDL_MouseButtonEvent *bev;
     struct sdl2_console *scon = get_scon_from_window(ev->button.windowID);
     int x, y;
-    int off_x, off_y;
-    double scale;
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
 
     bev = &ev->button;
-    sdl2_window_to_surface(scon, &off_x, &off_y, &scale);
-    x = MIN(MAX((int64_t)((bev->x - off_x) / scale), 0),
-            surface_width(scon->surface) - 1);
-    y = MIN(MAX((int64_t)((bev->y - off_y) / scale), 0),
-            surface_height(scon->surface) - 1);
+    /* SDL converts mouse events into logical (guest) coordinates when a
+     * logical size is set (see sdl2_2d_switch). */
+    x = MIN(MAX(bev->x, 0), surface_width(scon->surface) - 1);
+    y = MIN(MAX(bev->y, 0), surface_height(scon->surface) - 1);
 
     if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {

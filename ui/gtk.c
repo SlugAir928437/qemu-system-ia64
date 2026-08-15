@@ -876,15 +876,37 @@ static gboolean gd_touch_handle(VirtualConsole *vc, int type,
                                 double x, double y)
 {
     Error *err = NULL;
+    GtkWidget *widget = vc->gfx.drawing_area;
+    double wx_offset, wy_offset;
+    double ww_surface, wh_surface;
+    double fbx, fby;
+    int ww_widget, wh_widget;
 
-    if (!vc->gfx.ds) {
+    if (!vc->gfx.ds || vc->gfx.scale_x <= 0 || vc->gfx.scale_y <= 0) {
         return TRUE;
     }
 
+    /* Map the widget (GTK logical) coordinates back into the guest
+     * framebuffer, taking the letterbox offset and the uniform scale into
+     * account (same math as gd_motion_event / gd_draw_func). */
+    ww_surface = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
+    wh_surface = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
+    ww_widget = gtk_widget_get_width(widget);
+    wh_widget = gtk_widget_get_height(widget);
+    wx_offset = wy_offset = 0;
+    if (ww_widget > ww_surface) {
+        wx_offset = (ww_widget - ww_surface) / 2;
+    }
+    if (wh_widget > wh_surface) {
+        wy_offset = (wh_widget - wh_surface) / 2;
+    }
+    fbx = (x - wx_offset) / vc->gfx.scale_x;
+    fby = (y - wy_offset) / vc->gfx.scale_y;
+
     console_handle_touch_event(vc->gfx.dcl.con, touch_slots,
                                0, surface_width(vc->gfx.ds),
-                               surface_height(vc->gfx.ds), x,
-                               y, type, &err);
+                               surface_height(vc->gfx.ds), fbx,
+                               fby, type, &err);
     if (err) {
         warn_report_err(err);
     }
