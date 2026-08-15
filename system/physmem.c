@@ -757,6 +757,20 @@ MemoryRegionSection *iotlb_to_section(CPUState *cpu,
     int section_index = index & ~TARGET_PAGE_MASK;
     MemoryRegionSection *ret;
 
+    if (unlikely(section_index >= d->map.sections_nb)) {
+        /*
+         * Stale TLB entry: the address-space dispatch was rebuilt (e.g. a
+         * machine-init alias/IO registration) and the CPU TLB was not
+         * flushed in time.  Fail the access as unassigned instead of
+         * aborting on the assertion below; the next probe re-fills the TLB
+         * against the current dispatch.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "iotlb_to_section: stale TLB section index %d "
+                      "exceeds dispatch sections %u\n",
+                      section_index, d->map.sections_nb);
+        return &d->map.sections[PHYS_SECTION_UNASSIGNED];
+    }
     assert(section_index < d->map.sections_nb);
     ret = d->map.sections + section_index;
     assert(ret->mr);
