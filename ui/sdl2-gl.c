@@ -30,6 +30,14 @@
 #include "ui/input.h"
 #include "ui/sdl2.h"
 
+#ifdef __LIMBO__
+/* Injected by vm-executor-jni.c at VM start via set_qemu_var().
+ *   0 = stretch to fill the screen (ignore aspect ratio)
+ *   1 = keep the guest aspect ratio (letterbox, default)
+ *   2 = 1:1 pixel mapping (native guest resolution, centered) */
+extern int limbo_sdl_scale_mode;
+#endif
+
 static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 {
     if (scon->scanout_mode == scanout) {
@@ -54,9 +62,43 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
     sdl2_set_scanout_mode(scon, false);
 
     SDL_GetWindowSize(scon->real_window, &ww, &wh);
-    surface_gl_setup_viewport(scon->gls, scon->surface, ww, wh);
 
+#ifdef __LIMBO__
+    {
+        int mode = limbo_sdl_scale_mode;
+        if (mode < 0) {
+            mode = 1; /* fallback to aspect */
+        }
+        /* Clear the entire window to black first (letterbox/pillarbox border) */
+        glViewport(0, 0, ww, wh);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        switch (mode) {
+        case 0: /* stretch — fill the entire window */
+            glViewport(0, 0, ww, wh);
+            break;
+        case 2: { /* 1:1 — native guest resolution, centered */
+            int gw = surface_width(scon->surface);
+            int gh = surface_height(scon->surface);
+            int vx = (ww - gw) / 2;
+            int vy = (wh - gh) / 2;
+            glViewport(MAX(vx, 0), MAX(vy, 0),
+                       MIN(gw, ww), MIN(gh, wh));
+            break;
+        }
+        case 1: /* aspect — letterbox, keep aspect ratio */
+        default:
+            surface_gl_setup_viewport(scon->gls, scon->surface, ww, wh);
+            break;
+        }
+
+        surface_gl_render_texture(scon->gls, scon->surface);
+    }
+#else
+    surface_gl_setup_viewport(scon->gls, scon->surface, ww, wh);
     surface_gl_render_texture(scon->gls, scon->surface);
+#endif
     SDL_GL_SwapWindow(scon->real_window);
 }
 

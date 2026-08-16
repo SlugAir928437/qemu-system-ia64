@@ -511,26 +511,26 @@ static void handle_textinput(SDL_Event *ev)
  * Map window (pixel) coordinates back into the guest framebuffer for the
  * non-letterboxed scale modes.
  *
- * In aspect mode (1) SDL_RenderSetLogicalSize() is set to the guest
- * resolution, so SDL already reports mouse events in guest (logical)
- * coordinates and no conversion is needed.  In stretch (0) and 1:1 (2)
- * modes the logical space equals the renderer output, so the raw window
- * coordinates must be converted here using the same math the renderer
- * applies in sdl2_2d_update().
+ * Works for both the 2D path (SDL_RenderSetLogicalSize applied) and the
+ * GL path (raw window coordinates).  In aspect mode (1) the viewport
+ * coordinate mapping is already correct, so no conversion is needed.
+ * In stretch (0) and 1:1 (2) modes the raw window coordinates are
+ * converted using the same math the renderer applies.
  */
 static void sdl2_map_to_guest(struct sdl2_console *scon, int *x, int *y)
 {
-    int gw, gh, ow, oh;
+    int gw, gh, ww, wh, vx, vy;
     int mode = limbo_sdl_scale_mode;
 
     if (mode < 0) {
         mode = 1; /* default: aspect */
     }
-    if (mode == 1 || !scon->real_renderer || !scon->surface) {
+    if (mode == 1 || !scon->surface) {
         return;
     }
-    if (SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh) != 0 ||
-        ow <= 0 || oh <= 0) {
+
+    SDL_GetWindowSize(scon->real_window, &ww, &wh);
+    if (ww <= 0 || wh <= 0) {
         return;
     }
 
@@ -538,13 +538,15 @@ static void sdl2_map_to_guest(struct sdl2_console *scon, int *x, int *y)
     gh = surface_height(scon->surface);
 
     if (mode == 0) {
-        /* stretch: uniform-independent scale back to guest pixels */
-        *x = *x * gw / ow;
-        *y = *y * gh / oh;
+        /* stretch: viewport fills the entire window */
+        *x = *x * gw / ww;
+        *y = *y * gh / wh;
     } else {
-        /* 1:1: remove the centered letterbox offset */
-        *x -= (ow - gw) / 2;
-        *y -= (oh - gh) / 2;
+        /* 1:1: viewport is centered at native resolution */
+        vx = (ww - gw) / 2;
+        vy = (wh - gh) / 2;
+        *x -= vx;
+        *y -= vy;
     }
 
     *x = MIN(MAX(*x, 0), gw - 1);
