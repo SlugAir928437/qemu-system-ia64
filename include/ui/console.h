@@ -46,6 +46,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(QemuFixedTextConsole, QEMU_FIXED_TEXT_CONSOLE)
 /* in ms */
 #ifdef __LIMBO__
 extern int limbo_sdl_scale_hint;
+extern int limbo_sdl_scale_mode;
 extern int gui_refresh_interval_default;
 extern int gui_refresh_interval_idle;
 #define GUI_REFRESH_INTERVAL_DEFAULT gui_refresh_interval_default
