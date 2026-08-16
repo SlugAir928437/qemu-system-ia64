@@ -677,6 +677,16 @@ static void handle_windowevent(SDL_Event *ev)
             info.height = ev->window.data2;
             dpy_set_ui_info(scon->dcl.con, &info, true);
         }
+#ifdef __LIMBO__
+        /* The Android backend never sends SDL_WINDOWEVENT_SIZE_CHANGED, so
+         * SDL does not refresh the logical-size viewport on its own.  Re-apply
+         * the scale-mode logical size here, otherwise the letterbox/stretch
+         * math is still based on the old screen size after an orientation or
+         * screen-size change. */
+        if (!scon->opengl) {
+            sdl2_2d_update_logical_size(scon);
+        }
+#endif
         sdl2_redraw(scon);
         break;
     case SDL_WINDOWEVENT_EXPOSED:

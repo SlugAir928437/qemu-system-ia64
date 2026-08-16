@@ -31,6 +31,40 @@
 #ifdef __LIMBO__
 /* Injected at VM start by vm-executor-jni.c (set_qemu_var). */
 extern int limbo_sdl_scale_mode;
+
+/* Re-apply the Limbo display scale mode's logical size to the SDL renderer.
+ * Called from sdl2_2d_switch() (guest resolution change) and from sdl2.c on
+ * SDL_WINDOWEVENT_RESIZED (device orientation / screen size change), because
+ * SDL only refreshes the logical-size viewport on SDL_WINDOWEVENT_SIZE_CHANGED,
+ * which the Android backend never delivers.
+ *
+ *   aspect (1, default): logical size == guest resolution, SDL scales it to
+ *     the window preserving the aspect ratio (letterbox) and maps mouse events
+ *     into guest coordinates automatically;
+ *   stretch (0) / 1:1 (2): logical size == renderer output, the guest
+ *     framebuffer is stretched or blitted 1:1 manually in sdl2_2d_update(),
+ *     mouse coordinates are converted in sdl2.c (sdl2_map_to_guest). */
+void sdl2_2d_update_logical_size(struct sdl2_console *scon)
+{
+    int mode = limbo_sdl_scale_mode;
+    int ow = 0, oh = 0;
+
+    if (!scon->real_renderer) {
+        return;
+    }
+    if (mode < 0) {
+        mode = 1;
+    }
+    if (mode != 1 &&
+        SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh) == 0 &&
+        ow > 0 && oh > 0) {
+        SDL_RenderSetLogicalSize(scon->real_renderer, ow, oh);
+    } else {
+        SDL_RenderSetLogicalSize(scon->real_renderer,
+                                 surface_width(scon->surface),
+                                 surface_height(scon->surface));
+    }
+}
 #endif
 
 void sdl2_2d_update(DisplayChangeListener *dcl,
@@ -127,30 +161,8 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
 #endif
 
 #ifdef __LIMBO__
-    /* Limbo display scale modes:
-     *   aspect (1, default): logical size == guest resolution, SDL scales
-     *     it to the window preserving the aspect ratio (letterbox) and maps
-     *     the mouse events into guest coordinates automatically;
-     *   stretch (0) / 1:1 (2): logical size == renderer output, the guest
-     *     framebuffer is stretched or blitted 1:1 manually in
-     *     sdl2_2d_update(), mouse coordinates are converted in sdl2.c
-     *     (sdl2_map_to_guest). */
-    {
-        int mode = limbo_sdl_scale_mode;
-        int ow = 0, oh = 0;
-        if (mode < 0) {
-            mode = 1;
-        }
-        if (mode != 1 &&
-            SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh) == 0 &&
-            ow > 0 && oh > 0) {
-            SDL_RenderSetLogicalSize(scon->real_renderer, ow, oh);
-        } else {
-            SDL_RenderSetLogicalSize(scon->real_renderer,
-                                     surface_width(new_surface),
-                                     surface_height(new_surface));
-        }
-    }
+    /* Limbo display scale modes (see sdl2_2d_update_logical_size()). */
+    sdl2_2d_update_logical_size(scon);
 #else
     /* Let SDL scale the guest framebuffer to the window while preserving its
      * aspect ratio (letterboxing) and convert mouse events into logical

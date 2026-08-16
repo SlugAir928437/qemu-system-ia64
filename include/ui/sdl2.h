@@ -71,6 +71,9 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl);
 void sdl2_2d_redraw(struct sdl2_console *scon);
 bool sdl2_2d_check_format(DisplayChangeListener *dcl,
                           pixman_format_code_t format);
+#ifdef __LIMBO__
+void sdl2_2d_update_logical_size(struct sdl2_console *scon);
+#endif
 
 void sdl2_gl_update(DisplayChangeListener *dcl,
                     int x, int y, int w, int h);

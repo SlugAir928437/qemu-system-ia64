@@ -283,8 +283,62 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     SDL_GetWindowSize(scon->real_window, &ww, &wh);
+#ifdef __LIMBO__
+    {
+        int mode = limbo_sdl_scale_mode;
+        int dx = 0, dy = 0, dw = ww, dh = wh;
+        int gw = scon->guest_fb.width;
+        int gh = scon->guest_fb.height;
+
+        if (mode < 0) {
+            mode = 1;
+        }
+
+        /* Black out the whole window first (letterbox/pillarbox border). */
+        glViewport(0, 0, ww, wh);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        switch (mode) {
+        case 0: /* stretch — fill the entire window */
+            dx = 0;
+            dy = 0;
+            dw = ww;
+            dh = wh;
+            break;
+        case 2: { /* 1:1 — native guest resolution, centered */
+            dx = MAX((ww - gw) / 2, 0);
+            dy = MAX((wh - gh) / 2, 0);
+            dw = MIN(gw, ww);
+            dh = MIN(gh, wh);
+            break;
+        }
+        case 1: /* aspect — letterbox, keep aspect ratio */
+        default: {
+            double sw = (double)ww / gw;
+            double sh = (double)wh / gh;
+            if (sw < sh) {
+                dw = ww;
+                dh = (int)(gh * sw);
+                dx = 0;
+                dy = (wh - dh) / 2;
+            } else {
+                dh = wh;
+                dw = (int)(gw * sh);
+                dy = 0;
+                dx = (ww - dw) / 2;
+            }
+            break;
+        }
+        }
+
+        egl_fb_setup_default(&scon->win_fb, dw, dh, dx, dy);
+        egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
+    }
+#else
     egl_fb_setup_default(&scon->win_fb, ww, wh, 0, 0);
     egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
+#endif
 
     SDL_GL_SwapWindow(scon->real_window);
 }
