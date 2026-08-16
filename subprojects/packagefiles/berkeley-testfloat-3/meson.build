@@ -1,7 +1,12 @@
 project('berkeley-testfloat-3',  'c',
         default_options: ['warning_level=1', 'c_std=gnu99'])
 
-fpcflags = get_option('defines')
+# The Android build applies -Ofast (which implies -ffast-math) globally via
+# CFLAGS. That disables precise FP and makes clang reject
+# '#pragma STDC FENV_ACCESS ON' used throughout the testfloat sources.
+# Re-enable precise FP for this test-only library by undoing fast-math.
+# This is placed in the target c_args so it overrides the global -Ofast.
+fpcflags = get_option('defines') + ['-fno-fast-math']
 
 platform_data = configuration_data()
 platform_data.set('INLINE', 'static inline')
