@@ -506,6 +506,52 @@ static void handle_textinput(SDL_Event *ev)
     }
 }
 
+#ifdef __LIMBO__
+/*
+ * Map window (pixel) coordinates back into the guest framebuffer for the
+ * non-letterboxed scale modes.
+ *
+ * In aspect mode (1) SDL_RenderSetLogicalSize() is set to the guest
+ * resolution, so SDL already reports mouse events in guest (logical)
+ * coordinates and no conversion is needed.  In stretch (0) and 1:1 (2)
+ * modes the logical space equals the renderer output, so the raw window
+ * coordinates must be converted here using the same math the renderer
+ * applies in sdl2_2d_update().
+ */
+static void sdl2_map_to_guest(struct sdl2_console *scon, int *x, int *y)
+{
+    int gw, gh, ow, oh;
+    int mode = limbo_sdl_scale_mode;
+
+    if (mode < 0) {
+        mode = 1; /* default: aspect */
+    }
+    if (mode == 1 || !scon->real_renderer || !scon->surface) {
+        return;
+    }
+    if (SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh) != 0 ||
+        ow <= 0 || oh <= 0) {
+        return;
+    }
+
+    gw = surface_width(scon->surface);
+    gh = surface_height(scon->surface);
+
+    if (mode == 0) {
+        /* stretch: uniform-independent scale back to guest pixels */
+        *x = *x * gw / ow;
+        *y = *y * gh / oh;
+    } else {
+        /* 1:1: remove the centered letterbox offset */
+        *x -= (ow - gw) / 2;
+        *y -= (oh - gh) / 2;
+    }
+
+    *x = MIN(MAX(*x, 0), gw - 1);
+    *y = MIN(MAX(*y, 0), gh - 1);
+}
+#endif
+
 static void handle_mousemotion(SDL_Event *ev)
 {
     int max_x, max_y;
@@ -523,6 +569,9 @@ static void handle_mousemotion(SDL_Event *ev)
      * relative deltas are already scaled for the letterboxed display. */
     x = ev->motion.x;
     y = ev->motion.y;
+#ifdef __LIMBO__
+    sdl2_map_to_guest(scon, &x, &y);
+#endif
     if (qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
         max_x = surf_w - 1;
         max_y = surf_h - 1;
@@ -557,8 +606,13 @@ static void handle_mousebutton(SDL_Event *ev)
     bev = &ev->button;
     /* SDL converts mouse events into logical (guest) coordinates when a
      * logical size is set (see sdl2_2d_switch). */
-    x = MIN(MAX(bev->x, 0), surface_width(scon->surface) - 1);
-    y = MIN(MAX(bev->y, 0), surface_height(scon->surface) - 1);
+    x = bev->x;
+    y = bev->y;
+#ifdef __LIMBO__
+    sdl2_map_to_guest(scon, &x, &y);
+#endif
+    x = MIN(MAX(x, 0), surface_width(scon->surface) - 1);
+    y = MIN(MAX(y, 0), surface_height(scon->surface) - 1);
 
     if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {
@@ -865,6 +919,14 @@ static void sdl2_display_early_init(DisplayOptions *o)
 
 #ifdef __LIMBO__
 int limbo_sdl_scale_hint = -1;
+
+/* Display scale mode selected from the app UI (Limbo):
+ *   0 = stretch to fill the screen (ignore aspect ratio)
+ *   1 = keep the guest aspect ratio (letterbox, default)
+ *   2 = 1:1 pixel mapping (native guest resolution, centered)
+ * The mode is injected at VM start by vm-executor-jni.c via set_qemu_var(),
+ * so this global must stay a dlsym-visible non-static symbol. */
+int limbo_sdl_scale_mode = -1;
 #endif
 
 static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)

@@ -711,6 +711,18 @@ void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget)
         GUI_REFRESH_INTERVAL_DEFAULT;
 }
 
+#ifdef __LIMBO__
+/*
+ * Display scale mode selected from the app UI (Limbo):
+ *   0 = stretch to fill the screen (ignore aspect ratio)
+ *   1 = keep the guest aspect ratio (letterbox, default)
+ *   2 = 1:1 pixel mapping (native guest resolution, centered)
+ * Injected at VM start by vm-executor-jni.c via set_qemu_var(), so this
+ * global must stay a dlsym-visible non-static symbol.
+ */
+int limbo_gtk_scale_mode = -1;
+#endif
+
 void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh)
 {
     double sx, sy;
@@ -721,6 +733,24 @@ void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh)
 
     sx = (double)ww / fbw;
     sy = (double)wh / fbh;
+#ifdef __LIMBO__
+    /* On Android the window always covers the whole screen, so the scale is
+     * always recomputed from the widget size and the requested mode. */
+    switch (limbo_gtk_scale_mode) {
+    case 0: /* stretch: fill the whole screen, break the aspect ratio */
+        vc->gfx.scale_x = sx;
+        vc->gfx.scale_y = sy;
+        break;
+    case 2: /* 1:1: keep the native guest pixels, centered */
+        vc->gfx.scale_x = 1.0;
+        vc->gfx.scale_y = 1.0;
+        break;
+    case 1: /* aspect (default): uniform scale with letterboxing */
+    default:
+        vc->gfx.scale_x = vc->gfx.scale_y = MIN(sx, sy);
+        break;
+    }
+#else
     if (vc->s->full_screen || vc->s->free_scale) {
         if (vc->s->keep_aspect_ratio) {
             /* Uniform scale: preserve the guest aspect ratio (letterbox). */
@@ -730,6 +760,7 @@ void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh)
             vc->gfx.scale_y = sy;
         }
     }
+#endif
 }
 
 static void gd_draw_func(GtkDrawingArea *area, cairo_t *cr,
