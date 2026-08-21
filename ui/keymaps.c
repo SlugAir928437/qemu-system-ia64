@@ -209,6 +209,25 @@ int keysym2scancode(kbd_layout_t *k, int keysym,
     }
 #endif
 
+    if (!k) {
+        /* Fallback: no keymap file loaded (e.g. on Android).
+         * Use x11 keysym -> QKeyCode -> AT set1 scancode mapping. */
+        QKeyCode qcode;
+        int scancode;
+
+        if ((unsigned)keysym >= qemu_input_map_x11_to_qcode_len) {
+            trace_keymap_unmapped(keysym);
+            return 0;
+        }
+        qcode = qemu_input_map_x11_to_qcode[keysym];
+        if (qcode == 0 || qcode >= qemu_input_map_qcode_to_atset1_len) {
+            trace_keymap_unmapped(keysym);
+            return 0;
+        }
+        scancode = qemu_input_map_qcode_to_atset1[qcode];
+        return scancode;
+    }
+
     keysym2code = g_hash_table_lookup(k->hash, GINT_TO_POINTER(keysym));
     if (!keysym2code) {
         trace_keymap_unmapped(keysym);

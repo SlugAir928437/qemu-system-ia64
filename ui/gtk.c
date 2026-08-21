@@ -45,6 +45,11 @@
 #ifdef G_OS_WIN32
 #include <gdk/gdkwin32.h>
 #endif
+#ifdef GDK_WINDOWING_ANDROID
+#define __GDKANDROID_H_INSIDE__
+#include <gdk/android/gdkandroiddisplay.h>
+#undef __GDKANDROID_H_INSIDE__
+#endif
 #include "ui/win32-kbd-hook.h"
 
 #include <glib/gi18n.h>
@@ -82,6 +87,7 @@
 
 static const guint16 *keycode_map;
 static size_t keycode_maplen;
+static bool gd_use_keyval;
 
 struct VCChardev {
     Chardev parent;
@@ -1148,6 +1154,15 @@ static const guint16 *gd_get_keymap(size_t *maplen)
     }
 #endif
 
+#ifdef GDK_WINDOWING_ANDROID
+    if (GDK_IS_ANDROID_DISPLAY(dpy)) {
+        trace_gd_keymap_windowing("android");
+        gd_use_keyval = true;
+        *maplen = qemu_input_map_x11_to_qcode_len;
+        return qemu_input_map_x11_to_qcode;
+    }
+#endif
+
     g_warning("Unsupported GDK Windowing platform.\n"
               "Disabling extended keycode tables.\n"
               "Please report to qemu-devel@nongnu.org\n"
@@ -1187,7 +1202,7 @@ static gboolean gd_text_key_down(GtkEventControllerKey *controller,
             gint len = g_unichar_to_utf8(uc, buf);
             qemu_text_console_put_string(con, buf, len);
         } else {
-            int qcode = gd_map_keycode(keycode);
+            int qcode = gd_map_keycode(gd_use_keyval ? keyval : keycode);
             qemu_text_console_put_qcode(con, qcode, false);
         }
     }
@@ -1223,8 +1238,7 @@ static gboolean gd_key_event(GtkEventControllerKey *controller,
         return TRUE;
     }
 
-    qcode = gd_map_keycode(keycode);
-
+    qcode = gd_map_keycode(gd_use_keyval ? keyval : keycode);
     trace_gd_key_event(vc->label, keycode, qcode, "down");
 
     qkbd_state_key_event(vc->gfx.kbd, qcode, true);
@@ -1244,7 +1258,7 @@ static gboolean gd_key_release_event(GtkEventControllerKey *controller,
         return TRUE;
     }
 
-    qcode = gd_map_keycode(keycode);
+    qcode = gd_map_keycode(gd_use_keyval ? keyval : keycode);
     qkbd_state_key_event(vc->gfx.kbd, qcode, false);
 
     return TRUE;

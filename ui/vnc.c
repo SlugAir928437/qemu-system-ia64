@@ -3513,7 +3513,12 @@ void vnc_display_init(const char *id, Error **errp)
     }
 
     if (!vd->kbd_layout) {
-        return;
+        warn_report("VNC: keyboard layout not available, using fallback mapping. "
+                    "Some keys may not work correctly.");
+        /* Continue with NULL kbd_layout; keysym2scancode() has built-in
+         * x11 keysym -> qcode -> atset1 scancode fallback support */
+        error_free(*errp);
+        *errp = NULL;
     }
 
     vd->share_policy = VNC_SHARE_POLICY_ALLOW_EXCLUSIVE;
