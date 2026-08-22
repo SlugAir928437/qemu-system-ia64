@@ -4,8 +4,8 @@
  * IA-64 virtual PC platform.
  *
  * Provides RAM, a bootstrap CPU, a serial console,
- * firmware ROM loading via -bios, a PCI host bridge, SCSI and AHCI storage
- * controllers, an Ethernet controller, OHCI/UHCI USB,
+ * firmware ROM loading via -bios, a PCI host bridge, CMD646 IDE and SCSI
+ * storage controllers, an Ethernet controller, OHCI/UHCI USB,
  * local SAPIC/I/O SAPIC wiring,
  * and ACPI fixed power-management registers.
  */
@@ -29,6 +29,7 @@
 #include "hw/loader.h"
 #include "hw/sysbus.h"
 #include "hw/ide/ahci-pci.h"
+#include "hw/ide/pci.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
@@ -436,6 +437,7 @@ struct IA64VpcMachineState {
     PCIDevice *ahci_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
+    PCIDevice *cmd646_dev;
     PCIDevice *lsi_dev;
     PCIDevice *vga_dev;
     PCIDevice *nic_devs[MAX_NICS];
@@ -2510,6 +2512,24 @@ static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
                              PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_cmd646(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    /*
+     * The CMD646 exposes four IO BARs (primary/secondary data+command blocks)
+     * plus a 16-byte bus-master DMA BAR.  The IA-64 firmware programs these
+     * BARs itself to its reserved legacy IDE frame (0x800/0x808/0x810/0x818,
+     * BM-IDE at 0xc000), so the machine must only lift the IO + bus-master
+     * enable bits; the default unprogrammed BARs stay dormant until the
+     * firmware assigns them.
+     */
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_ohci(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -2609,6 +2629,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_lsi(s->lsi_dev);
+    ia64_vpc_configure_cmd646(s->cmd646_dev);
     ia64_vpc_configure_vga(s->vga_dev);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
@@ -2617,6 +2638,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
     ia64_vpc_configure_pci_irq(s->lsi_dev);
+    ia64_vpc_configure_pci_irq(s->cmd646_dev);
     ia64_vpc_configure_pci_irq(s->vga_dev);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_pci_irq(s->nic_devs[i]);
@@ -2979,10 +3001,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     PCIBus *pci_bus;
     ISABus *isa_bus;
     MemoryRegion *pci_io;
-#ifdef CONFIG_IA64_VPC_STORAGE
-    DriveInfo *sata_drives[6] = { NULL };
-    AHCIPCIState *ahci;
-#endif
     int i;
 
     if (!ia64_vpc_validate_configuration(machine, s, errp)) {
@@ -3107,17 +3125,25 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                                IA64_PCI_INTX_GSI_BASE + i));
     }
 
-    /*
-     * AHCI remains available for guests that support SATA.  Firmware boot
-     * storage is provided by the LSI SCSI HBA below.
-     */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
-    ia64_vpc_configure_ahci(s->ahci_dev);
-    ahci = ICH9_AHCI(s->ahci_dev);
-    g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
-    ide_drive_get(sata_drives, ahci->ahci.ports);
-    ahci_ide_create_devs(&ahci->ahci, sata_drives);
+    /*
+     * Serve every IDE drive (including the boot CD-ROM) from a CMD646 legacy
+     * PCI IDE controller instead of a SATA AHCI HBA.
+     *
+     * The IA-64 firmware programs the controller's own IO BARs and drives the
+     * primary channel as legacy IDE/ATAPI; Windows XP/Server 2003 IA64 has an
+     * in-box IDE/ATAPI driver and therefore reads the installation CD here.
+     * A SATA/AHCI boot CD-ROM, by contrast, loads the setup loader but then
+     * leaves the installer unable to read the ISO (no Windows AHCI driver ->
+     * "txtsetup.inf is corrupt or missing"), while an LSI SCSI boot CD-ROM
+     * hangs this firmware build during its SCSI probe/read.  There is no
+     * "if=sata" interface in this tree, so CMD646 owns all if=ide drives.
+     */
+    s->cmd646_dev = pci_create_simple(pci_bus, PCI_DEVFN(5, 0),
+                                      "cmd646-ide");
+    ia64_vpc_configure_cmd646(s->cmd646_dev);
+    /* if=ide index 0 is the primary master: it becomes the firmware's boot CD. */
+    pci_ide_create_devs(s->cmd646_dev);
 #endif
 
     isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
