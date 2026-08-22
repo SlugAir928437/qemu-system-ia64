@@ -3244,7 +3244,15 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->i8042_enabled = true;
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->firmware_ide_dma = true;
+    /*
+     * Boot the installation CD unconditionally through PIO, not bus-master
+     * DMA.  Under TCG the CMD646 bus-master DMA buffer around the ISO can
+     * occasionally corrupt a sector; the setup boot loader reads most of the
+     * OS from it and a single bit-flipped file (e.g. a driver) then crashes
+     * the Windows graphical setup with STOP 0x7E right after
+     * "Setup is loading files".  PIO is slow but bit-accurate.
+     */
+    s->firmware_ide_dma = false;
 #endif
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     s->firmware_console = IA64_FW_CONSOLE_VGA;
