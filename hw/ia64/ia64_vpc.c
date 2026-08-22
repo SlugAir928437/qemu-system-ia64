@@ -3284,7 +3284,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_nic = "e1000";
 #endif
 #ifdef CONFIG_IA64_VPC_STORAGE
-    mc->block_default_type = IF_SCSI;
+    /*
+     * Default unattached drives to the CMD646 legacy IDE bus rather than the
+     * LSI SCSI HBA.  Windows XP/Server 2003 IA64 install crashes the graphical
+     * setup environment with STOP 0x7E (SYSTEM_THREAD_EXCEPTION_NOT_HANDLED)
+     * when the target disk rides on the LSI SCSI HBA and the Symbios SCSI
+     * driver faults; the in-box IDE/ATAPI driver is reliable on the boot CD and
+     * handles the target disk here.
+     */
+    mc->block_default_type = IF_IDE;
 #else
     mc->block_default_type = IF_NONE;
 #endif
