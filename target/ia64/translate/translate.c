@@ -1261,22 +1261,28 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
         return;
     }
 
+    if (!always_fault) {
+        /*
+         * Run ordinary unaligned loads/stores to completion flat
+         * (little-endian) instead of raising the IA-64 unaligned-reference
+         * fault.  Windows XP/Server 2003 IA64 leaves PSR.AC set in kernel
+         * mode, so the OS's alignment fix-up path is expected to repair these;
+         * under TCG that fix-up aborts and the access is escalated to
+         * STATUS_DATATYPE_MISALIGNMENT, which bugchecks the graphical setup
+         * environment with STOP 0x7E right after "Setup is loading files".
+         * Executing the access directly yields exactly the little-endian
+         * value the fix-up would have produced.  Semaphores (always_fault)
+         * still fault, since their alignment is architecturally mandated and
+         * an unaligned atomic cannot be emulated.
+         */
+        return;
+    }
+
     ok = gen_new_label();
     tmp = tcg_temp_new_i64();
     tcg_gen_andi_i64(tmp, addr, size - 1);
     tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, ok);
-
-    if (always_fault) {
-        tcg_gen_br(fault);
-    } else {
-        tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
-        tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fault);
-
-        tcg_gen_andi_i64(tmp, addr, 0xfff);
-        tcg_gen_addi_i64(tmp, tmp, size - 1);
-        tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, fault);
-    }
-
+    tcg_gen_br(fault);
     gen_set_label(ok);
 }
 
