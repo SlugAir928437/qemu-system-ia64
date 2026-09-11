@@ -38,6 +38,7 @@ enum {
     E100_SCB_COMMAND = 2,
     E100_SCB_POINTER = 4,
     E100_SCB_PORT = 8,
+    E100_SCB_MDI = 16,
     E100_EEPROM_SEMAPHORE = 30,
     E100_CU_START = 0x10,
     E100_CU_RESUME = 0x20,
@@ -61,6 +62,13 @@ enum {
     E100_STATS_EXTENDED_SIZE = 76,
     E100_STATS_TCO_SIZE = 80,
     E100_STATS_COMPLETE_DUMP_RESET = 0xa007,
+    E100_SCB_STATUS_MDI = BIT(11),
+    E100_MDI_READY = BIT(28),
+    E100_MDI_INTERRUPT = BIT(29),
+    E100_MDI_WRITE = 1U << 26,
+    E100_MDI_READ = 2U << 26,
+    E100_MDI_PHY_1 = 1U << 21,
+    E100_MII_EQUALIZER = 26,
 };
 
 static const E100Model models[] = {
@@ -168,6 +176,43 @@ static void eepro100_flash_aperture(void *obj, void *data,
 
     qpci_iounmap(dev, flash);
     qpci_iounmap(dev, csr);
+}
+
+static void eepro100_mdi_equalizer_nop(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QPCIDevice *dev = &((QEEPRO100 *)obj)->dev;
+    const uint32_t equalizer = E100_MDI_PHY_1 | (E100_MII_EQUALIZER << 16);
+
+    qpci_device_enable(dev);
+    for (unsigned int port = 0; port < 2; port++) {
+        QPCIBar bar = qpci_iomap(dev, port, NULL);
+
+        for (unsigned int variant = 0; variant < 2; variant++) {
+            uint32_t command = E100_MDI_WRITE | equalizer |
+                               (variant ? E100_MDI_INTERRUPT | 0x1fff : 0);
+
+            qpci_io_writew(dev, bar, E100_SCB_STATUS, E100_SCB_STATUS_MDI);
+            qpci_io_writel(dev, bar, E100_SCB_MDI, command);
+            g_assert_cmphex(qpci_io_readl(dev, bar, E100_SCB_MDI), ==,
+                            command | E100_MDI_READY);
+            g_assert_cmphex(qpci_io_readw(dev, bar, E100_SCB_STATUS) &
+                            E100_SCB_STATUS_MDI, ==, E100_SCB_STATUS_MDI);
+            g_assert_cmphex(qpci_config_readw(dev, PCI_STATUS) &
+                            PCI_STATUS_INTERRUPT, ==,
+                            variant ? PCI_STATUS_INTERRUPT : 0);
+            qpci_io_writew(dev, bar, E100_SCB_STATUS, E100_SCB_STATUS_MDI);
+            g_assert_cmphex(qpci_config_readw(dev, PCI_STATUS) &
+                            PCI_STATUS_INTERRUPT, ==, 0);
+
+            /* NOP ignores the data field and leaves the equalizer unchanged. */
+            command = E100_MDI_READ | equalizer;
+            qpci_io_writel(dev, bar, E100_SCB_MDI, command);
+            g_assert_cmphex(qpci_io_readl(dev, bar, E100_SCB_MDI), ==,
+                            command | E100_MDI_READY);
+        }
+        qpci_iounmap(dev, bar);
+    }
 }
 
 static void eepro100_extended_commands(void *obj, void *data,
@@ -644,6 +689,88 @@ static void eepro100_cu_circular_reset(void *obj, void *data,
     guest_free(alloc, cb_address);
 }
 
+#ifndef _WIN32
+static void eepro100_socket_cleanup(void *opaque)
+{
+    int *sockets = opaque;
+
+    close(sockets[0]);
+    qos_invalidate_command_line();
+    close(sockets[1]);
+    g_free(sockets);
+}
+
+static void *eepro100_socket_setup(GString *command, void *opaque)
+{
+    int *sockets = g_new(int, 2);
+
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    g_string_append_printf(command, " -netdev socket,id=rx,fd=%d", sockets[1]);
+    g_test_queue_destroy(eepro100_socket_cleanup, sockets);
+    return sockets;
+}
+
+static void eepro100_receive_crc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QPCIDevice *dev = &((QEEPRO100 *)obj)->dev;
+    QTestState *qts = dev->bus->qts;
+    int *sockets = data;
+    QPCIBar bar;
+    uint64_t config = guest_alloc(alloc, 32);
+    uint64_t rfd = guest_alloc(alloc, 128);
+    uint8_t packet[64];
+    uint8_t cb[32] = { 0 };
+    uint8_t received[80];
+
+    qpci_device_enable(dev);
+    bar = qpci_iomap(dev, 0, NULL);
+    stl_be_p(packet, 60);
+    for (unsigned int i = 0; i < 60; i++) {
+        packet[i + 4] = i;
+    }
+    memset(packet + 4, 0xff, 6);
+    packet[16] = 0;
+    packet[17] = 20; /* IEEE 802.3 payload length, followed by padding. */
+    for (unsigned int variant = 0; variant < 4; variant++) {
+        unsigned int length = variant & 1 ? 34 : 60;
+        unsigned int total = length + (variant & 2 ? 4 : 0);
+        uint8_t header[16] = { 0 };
+
+        stw_le_p(cb + 2, E100_CB_COMMAND_EL | E100_CB_COMMAND_CONFIGURE);
+        cb[8] = 22;
+        cb[8 + 15] = 1; /* promiscuous */
+        cb[8 + 18] = (variant & 1) | ((variant & 2) << 1);
+        qtest_memwrite(qts, config, cb, sizeof(cb));
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, config);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_START);
+        g_assert_cmphex(qtest_readw(qts, config), ==, 0xa000);
+        stw_le_p(header + 2, 0x8000);
+        stw_le_p(header + 14, 80);
+        qtest_memset(qts, rfd, 0xa5, 128);
+        qtest_memwrite(qts, rfd, header, 16);
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, rfd);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, 1); /* RU_START */
+        g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                        ==, sizeof(packet));
+        for (unsigned int tries = 0; !(qtest_readw(qts, rfd) & 0x8000) &&
+             tries < 1000; tries++) {
+            qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+        }
+        g_assert_cmphex(qtest_readw(qts, rfd) & 0xa080, ==, 0xa000);
+        g_assert_cmpuint(qtest_readw(qts, rfd + 12), ==, total);
+        qtest_memread(qts, rfd + 16, received, sizeof(received));
+        g_assert_cmpmem(received, length, packet + 4, length);
+        if (variant & 2) {
+            g_assert_cmphex((uint32_t)ldl_le_p(received + length),
+                            ==, 0x8a151885);
+        }
+        g_assert_cmphex(received[total], ==, 0xa5);
+    }
+    guest_free(alloc, config);
+    guest_free(alloc, rfd);
+}
+#endif
+
 static void eepro100_register_nodes(void)
 {
     int i;
@@ -651,16 +778,32 @@ static void eepro100_register_nodes(void)
         .extra_device_opts = "addr=04.0",
     };
 
+    QOSGraphEdgeOptions ia64_opts = { .extra_device_opts = "addr=07.0" };
+
+    add_qpci_address(&ia64_opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(7, 0) });
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
     for (i = 0; i < ARRAY_SIZE(models); i++) {
         QOSGraphTestOptions bar_opts = { .arg = (void *)&models[i] };
 
         qos_node_create_driver(models[i].name, eepro100_create);
         qos_node_consumes(models[i].name, "pci-bus", &opts);
+        qos_node_consumes(models[i].name, "ia64-pci-bus", &ia64_opts);
         qos_node_produces(models[i].name, "pci-device");
         qos_add_test("bar-layout", models[i].name, eepro100_bar_layout,
                      &bar_opts);
+        qos_add_test("mdi-equalizer-nop", models[i].name,
+                     eepro100_mdi_equalizer_nop, NULL);
     }
+
+#ifndef _WIN32
+    QOSGraphTestOptions receive_opts = {
+        .before = eepro100_socket_setup,
+        .edge.extra_device_opts = "netdev=rx",
+    };
+
+    qos_add_test("receive-crc", "i82550", eepro100_receive_crc, &receive_opts);
+    qos_add_test("receive-crc", "i82559c", eepro100_receive_crc, &receive_opts);
+#endif
 
     qos_add_test("flash-aperture", "i82559er",
                  eepro100_flash_aperture, NULL);

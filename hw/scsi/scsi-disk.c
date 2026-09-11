@@ -1673,11 +1673,7 @@ static void scsi_disk_emulate_mode_select(SCSIDiskReq *r, uint8_t *inbuf)
         bs = p[5] << 16 | p[6] << 8 | p[7];
 
         /*
-         * Since the existing code only checks/updates bits 8-15 of the block
-         * size, restrict ourselves to the same requirement for now to ensure
-         * that a block size set by a block descriptor and then read back by
-         * a subsequent SCSI command will be the same. Also disallow a block
-         * size of 256 since we cannot handle anything below BDRV_SECTOR_SIZE.
+         * The emulated mode pages support 512-byte multiples up to 65024 bytes.
          */
         if (bs && !(bs & ~0xfe00) && bs != s->qdev.blocksize) {
             s->qdev.blocksize = bs;
@@ -2142,11 +2138,16 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
         outbuf[7] = 0;
         break;
     case REQUEST_SENSE:
-        /* Just return "NO SENSE".  */
-        buflen = scsi_convert_sense(NULL, 0, outbuf, r->buflen,
-                                    (req->cmd.buf[1] & 1) == 0);
+        /* Sense may have arrived while this request waited in an HBA queue. */
+        buflen = scsi_device_get_sense(req->dev, outbuf, r->buflen,
+                                      (req->cmd.buf[1] & 1) == 0);
         if (buflen < 0) {
             goto illegal_request;
+        }
+        if (req->dev->sense_is_ua) {
+            scsi_device_unit_attention_reported(req->dev);
+            req->dev->sense_len = 0;
+            req->dev->sense_is_ua = false;
         }
         break;
     case MECHANISM_STATUS:

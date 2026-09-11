@@ -33,6 +33,7 @@
 #define IA64_TB_FLAG_PSR_SS       (1u << 19)
 #define IA64_TB_FLAG_PSR_DB       (1u << 20)
 #define IA64_TB_FLAG_NAT_CLEAR    (1u << 21)
+#define IA64_TB_FLAG_IRQ_DEFER    (1u << 22)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -92,6 +93,11 @@ typedef struct IA64TranslationSIMDState {
     TCGv_vec result;
 } IA64TranslationSIMDState;
 
+typedef struct IA64TranslationFPState {
+    uint8_t enabled_sets;
+    bool rotating_synced;
+} IA64TranslationFPState;
+
 typedef struct DisasContext {
     DisasContextBase base;
     CPUIA64State *env;
@@ -100,6 +106,7 @@ typedef struct DisasContext {
     IA64TranslationBranchState branch;
     IA64TranslationRegisterState reg;
     IA64TranslationSIMDState simd;
+    IA64TranslationFPState fp;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -267,10 +274,6 @@ bool ia64_insn_has_invalid_fp_target(const Ia64Instruction *insn);
 bool ia64_insn_has_illegal_register(const Ia64Instruction *insn);
 bool ia64_insn_has_reserved_mask_field(const Ia64Instruction *insn);
 bool ia64_insn_is_empty_hint(const Ia64Instruction *insn);
-void ia64_prepare_self_counted_loop(
-    DisasContext *ctx, uint8_t template_code,
-    const IA64TemplateInfo *template_info, uint64_t *slots,
-    uint64_t bundle_ip);
 void ia64_gen_advance_restart_point(DisasContext *ctx, uint64_t bundle_ip,
                                     uint8_t slot, bool mlx_long);
 void ia64_gen_set_ri_tracked(DisasContext *ctx, uint8_t slot);

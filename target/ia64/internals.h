@@ -38,6 +38,7 @@ typedef struct IA64ExceptionState {
 
     /* Transient state spanning one serialization/fault-suppression window. */
     bool psr_ic_inflight;
+    bool psr_i_deferred;
     uint64_t psr_suppression_before_insn;
     uint64_t suppressed_tlb_pages[IA64_SUPPRESSED_TLB_MAX];
     uint16_t suppressed_tlb_idxmaps[IA64_SUPPRESSED_TLB_MAX];
@@ -75,6 +76,10 @@ typedef struct IA64MMUState {
     uint32_t tlb_inst_generation;
     IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
     IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
+    IA64MicroTlbEntry tlb_data_victim[IA64_MICRO_TLB_VICTIM_SIZE];
+    IA64MicroTlbEntry tlb_inst_victim[IA64_MICRO_TLB_VICTIM_SIZE];
+    uint8_t tlb_data_victim_next;
+    uint8_t tlb_inst_victim_next;
     IA64CodeTlbEdCache code_tlb_ed;
 
     /* Transient bookkeeping for architected purge operations. */
@@ -85,6 +90,10 @@ typedef struct IA64MMUState {
 typedef struct IA64InterruptState {
     /* Architected Local SAPIC and pending external interrupt state. */
     uint8_t pending_extint;
+    uint8_t sapic_xtp;
+    uint16_t sapic_pmi_pending;
+    bool sapic_init_pending;
+    uint8_t sapic_init_reason;
     bool pal_halt_wake;
     uint64_t sapic_irr[4];
     uint64_t sapic_isr[4];
@@ -116,6 +125,26 @@ typedef struct IA64PalState {
     uint64_t pal_proc_copy_addr;
     uint64_t pal_interrupt_block_addr;
     uint64_t pal_io_block_addr;
+
+    /* Processor RAS log and asynchronous machine-check entry state. */
+    bool pal_mc_log_valid;
+    bool pal_cmc_pending;
+    bool pal_mca_pending;
+    bool pal_mca_active;
+    bool pal_init_active;
+    uint8_t pal_mc_severity;
+    uint64_t pal_mc_error_map;
+    uint64_t pal_mc_state_parameter;
+    uint64_t pal_mc_status;
+    uint64_t pal_mc_address;
+    uint64_t pal_mc_information;
+    uint64_t pal_mc_ip;
+    uint64_t pal_mca_entry;
+    uint64_t pal_mca_gp;
+    uint64_t pal_mca_pending_record_id;
+    uint64_t pal_mca_active_record_id;
+    uint64_t pal_init_entry;
+    uint64_t pal_init_gp;
 } IA64PalState;
 
 typedef struct IA64RSEState {
@@ -180,18 +209,23 @@ typedef struct IA64RSEState {
     IA64RnatWritebackImage rse_writeback_rnat;
     IA64RnatShadowEntry rse_rnat_shadow[IA64_RSE_RNAT_SHADOW_COUNT];
     uint8_t rse_rnat_shadow_count;
+    /* Derived hint, one plus a slot; validate the entry on every lookup. */
+    uint8_t rse_rnat_shadow_last;
 } IA64RSEState;
 
 typedef struct IA64AlatState {
     /* Architected ALAT contents; active_count is a derived fast-path cache. */
     IA64AlatEntry alat[IA64_ALAT_ENTRIES];
     uint32_t alat_active_count;
+    /* Derived register index (slot + 1), and occupied/free-slot bitmap. */
+    uint8_t alat_reg_slot[2][IA64_GR_COUNT];
+    uint32_t alat_occupied;
     bool alat_full;
     /* Transient write-scope state for one faultable CPU store. */
     bool write_active;
     bool write_observed;
     uint64_t write_generation;
-    /* Transient host RAM-write generation observed by this local ALAT. */
+    /* Sum of host-local CPU store sequences and the external RAM generation. */
     uint64_t memory_write_generation;
 } IA64AlatState;
 

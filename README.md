@@ -47,13 +47,16 @@ non-persistent EFI variables.
 
 Select a machine explicitly with `-machine`.
 
-| Machine | CPU models | Max sockets | Max total cores / threads | Default input | Default VGA | Default RAM |
-| --- | --- | ---: | ---: | --- | --- | ---: |
-| `hp-i2000` | `merced` | 2 | 2 | USB keyboard + tablet | NVIDIA Quadro2 Pro | 2 GiB |
-| `hp-zx6000` | `madison-zx6000` | 2 | 2 | USB keyboard + tablet | ATI Radeon RV100 | 2 GiB |
-| `hp-rx2660` | `montecito-9010` (default), `montecito-9040` | 2 | 9010: 2 / 2; 9040: 4 / 8 | USB keyboard + tablet | ATI RN50 | 8 GiB |
-| `itanium2-vpc` | Any model below; `montecito` by default | 64 | 64 | USB keyboard + tablet | ATI Rage 128 Pro | 2 GiB |
-| `itanium-vpc` | Any model below; `merced` by default | 64 | 64 | PS/2 keyboard + mouse | ATI Rage 128 Pro | 2 GiB |
+| Machine | Default CPU | Max sockets | Max total cores / threads | Default VGA | Default RAM |
+| --- | --- | ---: | ---: | --- | ---: |
+| `hp-i2000` | `merced-800` | 2 | 2 | NVIDIA Quadro2 Pro | 2 GiB |
+| `hp-zx6000` | `madison-1500` | 2 | 2 | ATI Radeon RV100 | 2 GiB |
+| `hp-rx2660` | `montecito-9010` | 2 | 9010/9110n: 2 / 2; others: 4 / 8 | ATI RN50 | 8 GiB |
+| `itanium2-vpc` | `montecito-9050` | 64 | 64 | ATI Rage 128 Pro | 2 GiB |
+| `itanium-vpc` | `merced-800` | 64 | 64 | ATI Rage 128 Pro | 2 GiB |
+
+For machine-specific CPU restrictions, see the
+[IA-64 system emulator documentation](docs/system/target-ia64.rst).
 
 Use `-vga quadro2` for NVIDIA Quadro2 Pro or `-vga ati` for an ATI adapter.
 ATI models are `rage128p`, `rv100`, and `es1000`:
@@ -83,19 +86,11 @@ Specify `xres` and `yres` together. `xres` must be a multiple of 8.
 
 ## CPU models
 
-Select a model with `-cpu <model>`. Use `-cpu help` to list available models.
+Select a model with `-cpu <model>`. List available CPU names and aliases with:
 
-| Model | Generation | Cores/socket | Threads/core | Clock | L3/socket |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `merced` | Merced | 1 | 1 | 800 MHz | 4 MiB |
-| `madison` | Madison | 1 | 1 | 1.6 GHz | 3 MiB |
-| `madison-zx6000` | Madison | 1 | 1 | 1.5 GHz | 6 MiB |
-| `montecito` | Montecito | 2 | 2 | 1.6 GHz | 24 MiB (12 MiB/core) |
-| `montecito-9010` | Montecito | 1 | 1 | 1.6 GHz | 6 MiB |
-| `montecito-9040` | Montecito | 2 | 1-2 | 1.6 GHz | 18 MiB (9 MiB/core) |
-
-Clock and cache values are guest-visible metadata and do not affect emulation
-speed.
+```sh
+build/qemu-system-ia64 -cpu help
+```
 
 CPU selection does not set the topology. Configure it separately:
 
@@ -159,6 +154,22 @@ and device support remain experimental.
         alt="Debian 7.11.0 with GUI"
         src="https://github.com/user-attachments/assets/d1e5cdaa-64d6-4f91-9215-277423e268a2"
       />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img
+        width="100%"
+        alt="HP-UX 11i v3"
+        src="https://github.com/user-attachments/assets/cdc39b4e-027d-4e30-940d-9da310eb250d"
+      />
+    </td>
+    <td width="100%">
+     <img
+       width="100%"
+       alt="OpenVMS V8.4 IA-64"
+       src="https://github.com/user-attachments/assets/72834d75-a537-447f-b0a1-ada4fee4a283" 
+     />
     </td>
   </tr>
 </table>

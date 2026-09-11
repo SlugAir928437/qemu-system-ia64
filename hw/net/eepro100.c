@@ -72,7 +72,9 @@
 
 #define TRACE(flag, command) ((flag) ? (command) : (void)0)
 
-#define missing(text) fprintf(stderr, "eepro100: feature is missing in this emulation: " text "\n")
+#define missing(fmt, ...) \
+    fprintf(stderr, "eepro100: feature is missing in this emulation: " \
+            fmt "\n", ## __VA_ARGS__)
 
 #define MAX_ETH_FRAME_SIZE 1514
 
@@ -347,6 +349,7 @@ static const uint16_t eepro100_mdi_default[] = {
 #define E100_MII_BMSR                    1U
 #define E100_MII_BMSR_LINK_STATUS        0x0004U
 #define E100_MII_BMSR_AUTONEG_COMPLETE   0x0020U
+#define E100_MII_EQUALIZER               26U
 
 /* Readonly mask for MDI (PHY) registers */
 static const uint16_t eepro100_mdi_mask[] = {
@@ -866,7 +869,8 @@ static void dump_statistics(EEPRO100State * s)
                    s->statistics.xmt_tco_frames, attrs);
     stw_le_pci_dma(&s->dev, s->statsaddr + 78,
                    s->statistics.rcv_tco_frames, attrs);
-    missing("CU dump statistical counters");
+    missing("CU dump statistical counters: address=0x%08x, size=%u",
+            s->statsaddr, s->stats_size);
 #endif
 }
 
@@ -1063,7 +1067,8 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
             break;
         case CmdTx:
             if (bit_nc) {
-                missing("CmdTx: NC = 0");
+                missing("transmit with NC=1: command=0x%04x, cb=0x%08x",
+                        s->tx.command, s->cb_address);
                 ok_status = 0;
                 break;
             }
@@ -1080,7 +1085,9 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
             s->tx.status = 0;
             break;
         default:
-            missing("undefined command");
+            missing("action command: opcode=0x%x, command=0x%04x, "
+                    "cb=0x%08x", s->tx.command & COMMAND_CMD,
+                    s->tx.command, s->cb_address);
             ok_status = 0;
             break;
         }
@@ -1191,7 +1198,7 @@ static bool eepro100_cu_resume_allowed(EEPRO100State *s,
     MemTxResult result;
 
     if (!context->last_valid) {
-        /* Legacy migration streams did not preserve the previous CB. */
+        /* Legacy migration streams omit the previous command block. */
         return true;
     }
 
@@ -1312,7 +1319,9 @@ static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
         eepro100_cu_static_resume(s);
         break;
     default:
-        missing("Undefined CU command");
+        missing("CU command: opcode=0x%02x, scb_command=0x%02x, "
+                "pointer=0x%08x", val, s->mem[SCBCmd],
+                e100_read_reg4(s, SCBPointer));
     }
 }
 
@@ -1360,7 +1369,9 @@ static void eepro100_ru_command(EEPRO100State * s, uint8_t val)
         break;
     default:
         logout("val=0x%02x (undefined RU command)\n", val);
-        missing("Undefined SU command");
+        missing("RU command: opcode=0x%02x, scb_command=0x%02x, "
+                "pointer=0x%08x", val, s->mem[SCBCmd],
+                e100_read_reg4(s, SCBPointer));
     }
 }
 
@@ -1419,7 +1430,6 @@ static void eepro100_write_eeprom(eeprom_t * eeprom, uint8_t val)
  *
  ****************************************************************************/
 
-#if defined(DEBUG_EEPRO100)
 static const char * const mdi_op_name[] = {
     "opcode 0",
     "write",
@@ -1434,21 +1444,37 @@ static const char * const mdi_reg_name[] = {
     "PHY Identification (Word 2)",
     "Auto-Negotiation Advertisement",
     "Auto-Negotiation Link Partner Ability",
-    "Auto-Negotiation Expansion"
+    "Auto-Negotiation Expansion",
+    [E100_MII_EQUALIZER] = "Equalizer Control and Status",
 };
 
+#if defined(DEBUG_EEPRO100)
 static const char *reg2name(uint8_t reg)
 {
     static char buffer[10];
     const char *p = buffer;
-    if (reg < ARRAY_SIZE(mdi_reg_name)) {
+    if (reg < ARRAY_SIZE(mdi_reg_name) && mdi_reg_name[reg]) {
         p = mdi_reg_name[reg];
     } else {
         snprintf(buffer, sizeof(buffer), "reg=0x%02x", reg);
     }
     return p;
 }
-#endif                          /* DEBUG_EEPRO100 */
+#endif
+
+static void eepro100_missing_mdi(uint32_t val, const char *reason)
+{
+    uint8_t opcode = (val & BITS(27, 26)) >> 26;
+    uint8_t phy = (val & BITS(25, 21)) >> 21;
+    uint8_t reg = (val & BITS(20, 16)) >> 16;
+    uint16_t data = val & BITS(15, 0);
+    const char *reg_name = reg < ARRAY_SIZE(mdi_reg_name) && mdi_reg_name[reg] ?
+                          mdi_reg_name[reg] : "unnamed";
+
+    missing("MDI %s: opcode=%u (%s), phy=%u, reg=0x%02x (%s), "
+            "data=0x%04x, raw=0x%08x", reason, opcode,
+            mdi_op_name[opcode], phy, reg, reg_name, data, val);
+}
 
 static uint32_t eepro100_read_mdi(EEPRO100State * s)
 {
@@ -1493,7 +1519,12 @@ static void eepro100_write_mdi(EEPRO100State *s)
         TRACE(MDI, logout("val=0x%08x (int=%u, %s, phy=%u, %s, data=0x%04x\n",
                           val, raiseint, mdi_op_name[opcode], phy,
                           reg2name(reg), data));
-        if (opcode == 1) {
+        if (opcode == 1 && reg == E100_MII_EQUALIZER) {
+            /* Intel 8255x manual, section 7.3.11: opcode 000 is NOP. */
+            if (data & BITS(15, 13)) {
+                eepro100_missing_mdi(val, "equalizer command not implemented");
+            }
+        } else if (opcode == 1) {
             /* MDI write */
             switch (reg) {
             case 0:            /* Control Register */
@@ -1508,18 +1539,18 @@ static void eepro100_write_mdi(EEPRO100State *s)
                 }
                 break;
             case 1:            /* Status Register */
-                missing("not writable");
+                eepro100_missing_mdi(val, "write to read-only register");
                 break;
             case 2:            /* PHY Identification Register (Word 1) */
             case 3:            /* PHY Identification Register (Word 2) */
-                missing("not implemented");
+                eepro100_missing_mdi(val, "register write not implemented");
                 break;
             case 4:            /* Auto-Negotiation Advertisement Register */
             case 5:            /* Auto-Negotiation Link Partner Ability Register */
                 break;
             case 6:            /* Auto-Negotiation Expansion Register */
             default:
-                missing("not implemented");
+                eepro100_missing_mdi(val, "register write not implemented");
             }
             s->mdimem[reg] &= eepro100_mdi_mask[reg];
             s->mdimem[reg] |= data & ~eepro100_mdi_mask[reg];
@@ -1611,7 +1642,9 @@ static void eepro100_write_port(EEPRO100State *s)
         break;
     default:
         logout("val=0x%08x\n", val);
-        missing("unknown port selection");
+        missing("PORT command: selection=%u (%s), raw=0x%08x, "
+                "address=0x%08x", selection,
+                selection == PORT_DUMP ? "dump" : "unknown", val, address);
     }
 }
 
@@ -1669,7 +1702,8 @@ static uint8_t eepro100_read1(EEPRO100State * s, uint32_t addr)
         break;
     default:
         logout("addr=%s val=0x%02x\n", regname(addr), val);
-        missing("unknown byte read");
+        missing("register read: offset=0x%08x, size=1, returned=0x%02x",
+                addr, val);
     }
     return val;
 }
@@ -1700,7 +1734,8 @@ static uint16_t eepro100_read2(EEPRO100State * s, uint32_t addr)
         break;
     default:
         logout("addr=%s val=0x%04x\n", regname(addr), val);
-        missing("unknown word read");
+        missing("register read: offset=0x%08x, size=2, returned=0x%04x",
+                addr, val);
     }
     return val;
 }
@@ -1733,7 +1768,8 @@ static uint32_t eepro100_read4(EEPRO100State * s, uint32_t addr)
         break;
     default:
         logout("addr=%s val=0x%08x\n", regname(addr), val);
-        missing("unknown longword read");
+        missing("register read: offset=0x%08x, size=4, returned=0x%08x",
+                addr, val);
     }
     return val;
 }
@@ -1806,7 +1842,8 @@ static void eepro100_write1(EEPRO100State * s, uint32_t addr, uint8_t val)
         break;
     default:
         logout("addr=%s val=0x%02x\n", regname(addr), val);
-        missing("unknown byte write");
+        missing("register write: offset=0x%08x, size=1, value=0x%02x",
+                addr, val);
     }
 }
 
@@ -1855,7 +1892,8 @@ static void eepro100_write2(EEPRO100State * s, uint32_t addr, uint16_t val)
         break;
     default:
         logout("addr=%s val=0x%04x\n", regname(addr), val);
-        missing("unknown word write");
+        missing("register write: offset=0x%08x, size=2, value=0x%04x",
+                addr, val);
     }
 }
 
@@ -1884,7 +1922,8 @@ static void eepro100_write4(EEPRO100State * s, uint32_t addr, uint32_t val)
         break;
     default:
         logout("addr=%s val=0x%08x\n", regname(addr), val);
-        missing("unknown longword write");
+        missing("register write: offset=0x%08x, size=4, value=0x%08x",
+                addr, val);
     }
 }
 
@@ -1967,6 +2006,8 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
     const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
     EEPRO100State *s = qemu_get_nic_opaque(nc);
     uint16_t rfd_status = 0xa000;
+    size_t input_size = size;
+    g_autofree uint8_t *received = NULL;
 #if defined(CONFIG_PAD_RECEIVED_FRAMES)
     uint8_t min_buf[60];
 #endif
@@ -1983,12 +2024,16 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
     }
 #endif
 
+    if (size < ETH_HLEN) {
+        s->statistics.rx_short_frame_errors++;
+        return size;
+    }
     if (s->configuration[8] & 0x80) {
         /* CSMA is disabled. */
         logout("%p received while CSMA is disabled\n", s);
         return -1;
 #if !defined(CONFIG_PAD_RECEIVED_FRAMES)
-    } else if (size < 64 && (s->configuration[7] & BIT(0))) {
+    } else if (size < 60 && (s->configuration[7] & BIT(0))) {
         /* Short frame and configuration byte 7/0 (discard short receive) set:
          * Short frame is discarded */
         logout("%p received short frame (%zu byte)\n", s, size);
@@ -2059,6 +2104,30 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 #endif
         return -1;
     }
+    /* QEMU network backends supply Ethernet frames without the FCS. */
+    if (s->configuration[18] & (BIT(0) | BIT(2))) {
+        size_t wire_size = MAX(size, 60);
+        size_t payload_size = wire_size;
+        uint32_t fcs;
+
+        received = g_malloc0(wire_size + 4);
+        memcpy(received, buf, size);
+        fcs = ~net_crc32_le(received, wire_size);
+        /* Strip 802.3 padding; Ethernet II has a type, not a length. */
+        if ((s->configuration[18] & BIT(0)) && size >= 14) {
+            uint16_t length = lduw_be_p(buf + 12);
+
+            if (length <= 1500 && length <= size - 14) {
+                payload_size = 14 + length;
+            }
+        }
+        if (s->configuration[18] & BIT(2)) {
+            stl_le_p(received + payload_size, fcs);
+            payload_size += 4;
+        }
+        buf = received;
+        size = payload_size;
+    }
     /* !!! */
     eepro100_rx_t rx;
     pci_dma_read(&s->dev, s->ru_base + s->ru_offset,
@@ -2072,7 +2141,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         size = rfd_size;
     }
 #if !defined(CONFIG_PAD_RECEIVED_FRAMES)
-    if (size < 64) {
+    if (input_size < 60) {
         rfd_status |= 0x0080;
     }
 #endif
@@ -2085,15 +2154,6 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
     /* Early receive interrupt not supported. */
 #if 0
     eepro100_er_interrupt(s);
-#endif
-    /* Receive CRC Transfer not supported. */
-    if (s->configuration[18] & BIT(2)) {
-        missing("Receive CRC Transfer");
-        return -1;
-    }
-    /* TODO: check stripping enable bit. */
-#if 0
-    assert(!(s->configuration[17] & BIT(0)));
 #endif
     pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
                   sizeof(eepro100_rx_t), buf, size);
@@ -2110,7 +2170,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         /* S bit is set. */
         set_ru_state(s, ru_suspended);
     }
-    return size;
+    return input_size;
 }
 
 static void nic_link_status_changed(NetClientState *nc)
@@ -2128,7 +2188,6 @@ static int eepro100_post_load(void *opaque, int version_id)
     if (version_id < 4) {
         cu_state_t legacy_state = get_cu_state(s);
 
-        /* Older versions used one next offset and no queue-local state. */
         s->cu_hp.next_offset = s->cu_lp.next_offset;
         s->cu_lp.last_offset = 0;
         s->cu_hp.last_offset = 0;
@@ -2140,7 +2199,7 @@ static int eepro100_post_load(void *opaque, int version_id)
             s->cu_hp.state = cu_queue_idle;
             break;
         case cu_suspended:
-            /* The old stream cannot identify which queue was suspended. */
+            /* Legacy streams do not identify which queue was suspended. */
             s->cu_lp.state = cu_queue_suspended;
             s->cu_hp.state = info->has_priority_queues ?
                              cu_queue_suspended : cu_queue_idle;
@@ -2533,13 +2592,6 @@ static E100PCIDeviceInfo *eepro100_get_class_by_name(const char *typename)
     E100PCIDeviceInfo *info = NULL;
     int i;
 
-    /* This is admittedly awkward but also temporary.  QOM allows for
-     * parameterized typing and for subclassing both of which would suitable
-     * handle what's going on here.  But class_data is already being used as
-     * a stop-gap hack to allow incremental qdev conversion so we cannot use it
-     * right now.  Once we merge the final QOM series, we can come back here and
-     * do this in a much more elegant fashion.
-     */
     for (i = 0; i < ARRAY_SIZE(e100_devices); i++) {
         if (strcmp(e100_devices[i].name, typename) == 0) {
             info = &e100_devices[i];

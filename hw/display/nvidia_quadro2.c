@@ -7,9 +7,10 @@
  */
 
 /*
- * The following MIT notice applies to register and DMA-pusher definitions
- * derived from envytools:
+ * The following MIT notice applies to register, tiling and DMA-pusher
+ * definitions derived from envytools:
  *
+ * Copyright (C) 2012 Marcelina Kościelnicka <mwk@0x04.net>
  * Copyright (C) 2013 Marcelina Kościelnicka
  * Copyright (C) 2013 Ben Skeggs
  * Copyright (C) 2013 Martin Peres
@@ -40,6 +41,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "exec/target_page.h"
 
 #include "hw/core/qdev-properties.h"
 #include "hw/display/edid.h"
@@ -55,6 +57,7 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/main-loop.h"
 #include "qemu/timer.h"
 #include "qemu/units.h"
 #include "ui/console.h"
@@ -394,10 +397,7 @@
 #define NV15_CLIP_SIZE                 0x0304U
 
 #define NV15_MAX_OBJECTS               128U
-/*
- * TODO: Make PFIFO/PGRAPH work resumable instead of faulting when these
- * limits are reached.
- */
+/* Yield between commands when either dispatch budget is exhausted. */
 #define NV15_MAX_PUSH_WORDS            (1U << 16)
 #define NV15_MAX_PUSH_WORK_BYTES       (16U * 1024U * 1024U)
 #define NV15_MAX_2D_PIXELS             (16U * 1024U * 1024U)
@@ -437,8 +437,18 @@ typedef struct NV15Surface {
     unsigned int cpp;
 } NV15Surface;
 
+typedef struct NV15UploadCache {
+    uint32_t key[11];
+    NV15Surface destination;
+    uint32_t width;
+    uint32_t height;
+    unsigned int cpp;
+    bool valid;
+} NV15UploadCache;
+
 typedef struct NV15WorkBudget {
     uint64_t bytes;
+    bool exhausted;
 } NV15WorkBudget;
 
 typedef struct NV15CursorParams {
@@ -518,6 +528,8 @@ struct NVIDIAQuadro2State {
     uint32_t pmc[NV15_REG_WORDS(NV15_PMC_SIZE)];
     uint32_t pfifo[NV15_REG_WORDS(NV15_PFIFO_SIZE)];
     uint32_t ptimer[NV15_REG_WORDS(NV15_PTIMER_SIZE)];
+    QEMUBH *fifo_bh;
+    uint32_t fifo_pending_channels;
     uint32_t pfb[NV15_REG_WORDS(NV15_PFB_SIZE)];
     uint32_t pextdev[NV15_REG_WORDS(NV15_PEXTDEV_SIZE)];
     uint32_t pgraph[NV15_REG_WORDS(NV15_PGRAPH_SIZE)];
@@ -534,6 +546,11 @@ struct NVIDIAQuadro2State {
     bool surface_explicit[NV15_MAX_OBJECTS];
     uint8_t context_explicit[NV15_MAX_OBJECTS];
     NV15GraphicsObject objects[NV15_MAX_OBJECTS];
+    /* Host-derived slot + 1 indices; retain RAMHT and replacement order. */
+    NV15UploadCache upload_cache;
+    uint8_t object_hash[256];
+    uint8_t object_next[NV15_MAX_OBJECTS];
+    uint8_t bound_slot[NV15_USER_CHANNELS][NV15_USER_SUBCHANNELS];
     uint32_t rejected_methods;
     uint8_t active_channel;
     uint64_t ptimer_time_offset;
@@ -541,6 +558,8 @@ struct NVIDIAQuadro2State {
     uint64_t ptimer_clock_snapshot;
     bool ptimer_alarm_after_match;
     bool ptimer_legacy_clock;
+    uint64_t ptimer_multiplier;
+    uint64_t ptimer_divisor;
 
     bool cursor_guest_mode;
     QEMUCursor *cursor;
@@ -928,11 +947,102 @@ static void nv15_graphic_invalidate(void *opaque)
     s->vga.hw_ops->invalidate(&s->vga);
 }
 
+/* Packed rendering records VRAM damage without invalidating the mode. */
+static void nv15_graphic_damage(NVIDIAQuadro2State *s)
+{
+    if (nv15_get_bpp(&s->vga) < 8 ||
+        ((s->vga.gr[VGA_GFX_MODE] >> 5) & 3) < 2) {
+        graphic_hw_invalidate(s->vga.con);
+    }
+}
+
+/* NV10/NV15 PFB tiles, following envytools nvhw/tile.c. */
+static bool nv15_tile_pitch(uint32_t pitch, unsigned int *shift,
+                            unsigned int *factor)
+{
+    unsigned int units = pitch >> 8;
+
+    if ((pitch & ~0xff00U) || !units || (units & 1)) {
+        return false;
+    }
+    *shift = ctz32(units);
+    units >>= *shift;
+    if (units != 1 && units != 3 && units != 5 && units != 7) {
+        return false;
+    }
+    *factor = units >> 1;
+    return true;
+}
+
+static uint64_t nv15_tile_address(NVIDIAQuadro2State *s, uint64_t address)
+{
+    uint32_t cfg = s->pfb[(NV15_PFB_CFG0 - NV15_PFB_BASE) >> 2];
+    unsigned int parts = (cfg & 0x30) == 0x10 ? 2 :
+                         (cfg & 0x30) == 0x20 ? 0 : 1;
+    unsigned int columns = extract32(cfg, 24, 4);
+    unsigned int bank_shift;
+
+    /* Unspecified geometry defaults to nine column bits. */
+    columns = columns ? MIN(columns, 9) : 9;
+    bank_shift = 2 + parts + columns;
+    for (unsigned int i = 0; i < 8; i++) {
+        const uint32_t *tile = &s->pfb[(0x240 + i * 16) >> 2];
+        uint32_t base = tile[0] & 0x07ffc000;
+        uint32_t limit = (tile[1] & 0x07ffc000) | 0x3fff;
+        uint32_t pitch = tile[2] & 0xff00;
+        unsigned int shift, factor;
+        uint64_t offset, x, y, block, inside;
+
+        if (!(tile[0] & BIT(31)) || address < base || address > limit) {
+            continue;
+        }
+        if (bank_shift < 8 || !nv15_tile_pitch(pitch, &shift, &factor)) {
+            return UINT64_MAX;
+        }
+        offset = address - base;
+        x = offset % pitch;
+        y = (offset / pitch) >> (bank_shift - 8);
+        block = y * (pitch >> 8) + (x >> 8);
+        inside = (x & 0xff) |
+                 (((offset >> (shift + 8)) &
+                   ((1U << (bank_shift - 8)) - 1)) << 8);
+        block ^= y & 1;
+        if (2 + parts + (cfg & 1) > 4 && (offset & 0x100)) {
+            inside ^= 0x10;
+        }
+        return base + (block << bank_shift) + inside;
+    }
+    return address;
+}
+
+static uint8_t nv15_scanout_read(VGACommonState *vga, uint32_t address)
+{
+    NVIDIAQuadro2State *s = container_of(vga, NVIDIAQuadro2State, vga);
+    uint64_t offset = nv15_tile_address(s, address);
+
+    return offset < vga->vram_size ? vga->vram_ptr[offset] : 0;
+}
+
+static bool nv15_has_tiles(NVIDIAQuadro2State *s)
+{
+    for (unsigned int i = 0; i < 8; i++) {
+        if (s->pfb[(0x240 + i * 16) >> 2] & BIT(31)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool nv15_graphic_update(void *opaque)
 {
     NVIDIAQuadro2State *s = opaque;
-    bool complete = s->vga.hw_ops->gfx_update(&s->vga);
+    bool complete;
 
+    s->vga.scanout_read = nv15_native_mode(&s->vga) && nv15_has_tiles(s) &&
+                          ((s->vga.gr[VGA_GFX_MODE] >> 5) & 3) >= 2 ?
+                          nv15_scanout_read : NULL;
+    complete = s->vga.hw_ops->gfx_update(&s->vga);
+    s->vga.scanout_read = NULL;
     nv15_cursor_update_host(s);
     return complete;
 }
@@ -984,26 +1094,25 @@ static uint32_t *nv15_shadow_word(NVIDIAQuadro2State *s, hwaddr addr)
     return NULL;
 }
 
-static uint64_t nv15_muldiv64(uint64_t value, uint64_t multiplier,
-                              uint64_t divisor)
+static uint64_t nv15_muldiv64_full(uint64_t value, uint64_t multiplier,
+                                   uint64_t divisor, uint64_t *remainder)
 {
     uint64_t low;
     uint64_t high;
+    uint64_t rem;
 
     mulu64(&low, &high, value, multiplier);
-    divu128(&low, &high, divisor);
+    rem = divu128(&low, &high, divisor);
+    if (remainder) {
+        *remainder = rem;
+    }
     return low;
 }
 
-static uint64_t nv15_muldiv64_remainder(uint64_t value,
-                                        uint64_t multiplier,
-                                        uint64_t divisor)
+static uint64_t nv15_muldiv64(uint64_t value, uint64_t multiplier,
+                              uint64_t divisor)
 {
-    uint64_t low;
-    uint64_t high;
-
-    mulu64(&low, &high, value, multiplier);
-    return divu128(&low, &high, divisor);
+    return nv15_muldiv64_full(value, multiplier, divisor, NULL);
 }
 
 static bool nv15_ptimer_alarm_delay(uint64_t delta, uint64_t multiplier,
@@ -1031,7 +1140,8 @@ static bool nv15_ptimer_alarm_delay(uint64_t delta, uint64_t multiplier,
     return true;
 }
 
-static bool nv15_ptimer_rate(NVIDIAQuadro2State *s, uint64_t *multiplier,
+static bool nv15_ptimer_compute_rate(NVIDIAQuadro2State *s,
+                                     uint64_t *multiplier,
                               uint64_t *divisor)
 {
     uint32_t coeff =
@@ -1058,6 +1168,24 @@ static bool nv15_ptimer_rate(NVIDIAQuadro2State *s, uint64_t *multiplier,
     nvclk = ((uint64_t)NV15_XTAL_HZ * n / m) >> p;
     *multiplier = nvclk * denominator;
     *divisor = (uint64_t)NANOSECONDS_PER_SECOND * numerator;
+    return *multiplier != 0;
+}
+
+static void nv15_ptimer_update_rate(NVIDIAQuadro2State *s)
+{
+    s->ptimer_multiplier = 0;
+    s->ptimer_divisor = 0;
+    if (!nv15_ptimer_compute_rate(s, &s->ptimer_multiplier,
+                                   &s->ptimer_divisor)) {
+        s->ptimer_multiplier = 0;
+    }
+}
+
+static bool nv15_ptimer_rate(NVIDIAQuadro2State *s, uint64_t *multiplier,
+                              uint64_t *divisor)
+{
+    *multiplier = s->ptimer_multiplier;
+    *divisor = s->ptimer_divisor;
     return *multiplier != 0;
 }
 
@@ -1143,7 +1271,7 @@ static void nv15_ptimer_schedule_alarm(NVIDIAQuadro2State *s,
         timer_del(&s->ptimer_alarm_timer);
         return;
     }
-    scaled = nv15_muldiv64(now, multiplier, divisor);
+    scaled = nv15_muldiv64_full(now, multiplier, divisor, &phase);
     current = (scaled + s->ptimer_time_offset) & NV15_PTIMER_LOW_MASK;
     target =
         s->ptimer[(NV15_PTIMER_ALARM_0 - NV15_PTIMER_BASE) >> 2] >> 5;
@@ -1152,7 +1280,6 @@ static void nv15_ptimer_schedule_alarm(NVIDIAQuadro2State *s,
     if (after_match && !delta) {
         delta = NV15_PTIMER_LOW_PERIOD;
     }
-    phase = nv15_muldiv64_remainder(now, multiplier, divisor);
     if (!nv15_ptimer_alarm_delay(delta, multiplier, divisor, phase, &delay) ||
         delay > INT64_MAX - now) {
         deadline = INT64_MAX;
@@ -1415,17 +1542,83 @@ static bool nv15_ramht_lookup(NVIDIAQuadro2State *s, unsigned int channel,
     return false;
 }
 
+static unsigned int nv15_object_hash(uint32_t instance)
+{
+    return ((instance >> 4) ^ (instance >> 12)) & 255;
+}
+
+static void nv15_object_index_remove(NVIDIAQuadro2State *s,
+                                     NV15GraphicsObject *object)
+{
+    unsigned int slot = object - s->objects;
+    uint8_t *link = &s->object_hash[nv15_object_hash(object->instance)];
+
+    while (*link && *link != slot + 1) {
+        link = &s->object_next[*link - 1];
+    }
+    if (*link) {
+        *link = s->object_next[slot];
+    }
+}
+
+static void nv15_object_index_insert(NVIDIAQuadro2State *s,
+                                     NV15GraphicsObject *object)
+{
+    unsigned int slot = object - s->objects;
+    uint8_t *link = &s->object_hash[nv15_object_hash(object->instance)];
+
+    /* Duplicate entries use the lowest slot. */
+    while (*link && *link < slot + 1) {
+        link = &s->object_next[*link - 1];
+    }
+    s->object_next[slot] = *link;
+    *link = slot + 1;
+}
+
+static void nv15_object_index_rebuild(NVIDIAQuadro2State *s)
+{
+    s->upload_cache.valid = false;
+    memset(s->object_hash, 0, sizeof(s->object_hash));
+    memset(s->object_next, 0, sizeof(s->object_next));
+    memset(s->bound_slot, 0, sizeof(s->bound_slot));
+    for (unsigned int i = 0; i < NV15_MAX_OBJECTS; i++) {
+        if (s->objects[i].valid) {
+            nv15_object_index_insert(s, &s->objects[i]);
+        }
+    }
+}
+
 static NV15GraphicsObject *nv15_find_object(NVIDIAQuadro2State *s,
                                              uint32_t instance)
 {
-    unsigned int i;
+    unsigned int slot = s->object_hash[nv15_object_hash(instance)];
 
-    for (i = 0; i < NV15_MAX_OBJECTS; i++) {
-        if (s->objects[i].valid && s->objects[i].instance == instance) {
-            return &s->objects[i];
+    while (slot) {
+        NV15GraphicsObject *object = &s->objects[slot - 1];
+
+        if (object->instance == instance) {
+            return object;
         }
+        slot = s->object_next[slot - 1];
     }
     return NULL;
+}
+
+static NV15GraphicsObject *nv15_bound_object(NVIDIAQuadro2State *s,
+                                            unsigned int channel,
+                                            unsigned int subchannel)
+{
+    uint32_t instance = s->subchannel_instance[channel][subchannel];
+    unsigned int slot = s->bound_slot[channel][subchannel];
+    NV15GraphicsObject *object;
+
+    if (slot && s->objects[slot - 1].valid &&
+        s->objects[slot - 1].instance == instance) {
+        return &s->objects[slot - 1];
+    }
+    object = nv15_find_object(s, instance);
+    s->bound_slot[channel][subchannel] = object ? object - s->objects + 1 : 0;
+    return object;
 }
 
 static bool nv15_object_bound_on_active_channel(NVIDIAQuadro2State *s,
@@ -1452,8 +1645,7 @@ static NV15GraphicsObject *nv15_find_bound_object(NVIDIAQuadro2State *s,
     unsigned int subchannel;
 
     for (subchannel = 0; subchannel < NV15_USER_SUBCHANNELS; subchannel++) {
-        NV15GraphicsObject *object = nv15_find_object(
-            s, s->subchannel_instance[channel][subchannel]);
+        NV15GraphicsObject *object = nv15_bound_object(s, channel, subchannel);
 
         if (object && object->class_id == class_id) {
             return object;
@@ -1533,12 +1725,16 @@ static NV15GraphicsObject *nv15_get_object(NVIDIAQuadro2State *s,
     if (!object->valid || object->instance != instance ||
         object->class_id != class_id) {
         i = object - s->objects;
+        if (object->valid) {
+            nv15_object_index_remove(s, object);
+        }
         memset(object, 0, sizeof(*object));
         s->surface_explicit[i] = false;
         s->context_explicit[i] = 0;
         object->valid = true;
         object->instance = instance;
         object->class_id = class_id;
+        nv15_object_index_insert(s, object);
         /* NV10 GROBJs carry their initial state in the first three words. */
         object->operation = extract32(word0, 15, 3);
         object->mono_format = extract32(word1, 0, 2);
@@ -1578,25 +1774,13 @@ static NV15GraphicsObject *nv15_rehydrate_channel_objects(
     return nv15_find_object(s, wanted_instance);
 }
 
-static bool nv15_dma_object_load_internal(NVIDIAQuadro2State *s,
-                                          uint32_t instance,
-                                          bool allow_classless_fb,
-                                          NV15DMAObject *dma)
+static bool nv15_dma_object_decode(uint32_t flags, uint32_t limit,
+                                   uint32_t frame, bool allow_classless_fb,
+                                   NV15DMAObject *dma)
 {
-    uint32_t flags;
-    uint32_t limit;
-    uint32_t frame;
-    uint32_t class_id;
+    uint32_t class_id = flags & NV15_DMA_CLASS_MASK;
 
     memset(dma, 0, sizeof(*dma));
-    if (!nv15_ramin_range_valid(instance, 12)) {
-        return false;
-    }
-
-    flags = nv15_ramin_read32(s, instance);
-    limit = nv15_ramin_read32(s, instance + 4);
-    frame = nv15_ramin_read32(s, instance + 8);
-    class_id = flags & NV15_DMA_CLASS_MASK;
     if (class_id != NV15_DMA_FROM_MEMORY &&
         class_id != NV15_DMA_TO_MEMORY && class_id != NV15_DMA_IN_MEMORY &&
         !(allow_classless_fb && class_id == 0 &&
@@ -1613,6 +1797,25 @@ static bool nv15_dma_object_load_internal(NVIDIAQuadro2State *s,
     dma->class_id = class_id;
     dma->valid = true;
     return true;
+}
+
+static bool nv15_dma_object_load_internal(NVIDIAQuadro2State *s,
+                                          uint32_t instance,
+                                          bool allow_classless_fb,
+                                          NV15DMAObject *dma)
+{
+    uint32_t flags;
+    uint32_t limit;
+    uint32_t frame;
+
+    memset(dma, 0, sizeof(*dma));
+    if (!nv15_ramin_range_valid(instance, 12)) {
+        return false;
+    }
+    flags = nv15_ramin_read32(s, instance);
+    limit = nv15_ramin_read32(s, instance + 4);
+    frame = nv15_ramin_read32(s, instance + 8);
+    return nv15_dma_object_decode(flags, limit, frame, allow_classless_fb, dma);
 }
 
 static bool nv15_dma_object_load(NVIDIAQuadro2State *s, uint32_t instance,
@@ -1640,6 +1843,11 @@ static bool nv15_dma_range_valid(const NV15DMAObject *dma, uint64_t offset,
            size <= dma->length - offset;
 }
 
+static bool nv15_dma_is_vram(const NV15DMAObject *dma)
+{
+    return dma->target == NV15_DMA_TARGET_VRAM;
+}
+
 static bool nv15_dma_backing_range_valid(NVIDIAQuadro2State *s,
                                           const NV15DMAObject *dma,
                                           uint64_t offset, uint64_t size)
@@ -1650,11 +1858,25 @@ static bool nv15_dma_backing_range_valid(NVIDIAQuadro2State *s,
         uadd64_overflow(dma->address, offset, &address)) {
         return false;
     }
-    /* TODO: Apply programmed PFB tile regions to VRAM_TILED accesses. */
     if (dma->target == NV15_DMA_TARGET_VRAM ||
         dma->target == NV15_DMA_TARGET_VRAM_TILED) {
-        return address <= s->vga.vram_size &&
-               size <= s->vga.vram_size - address;
+        if (address > s->vga.vram_size ||
+            size > s->vga.vram_size - address) {
+            return false;
+        }
+        if (dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+            for (uint64_t done = 0; done < size; ) {
+                uint64_t physical = nv15_tile_address(s, address + done);
+                uint64_t count = MIN(size - done, 16 - ((address + done) & 15));
+
+                if (physical >= s->vga.vram_size ||
+                    count > s->vga.vram_size - physical) {
+                    return false;
+                }
+                done += count;
+            }
+        }
+        return true;
     }
     return dma->target == NV15_DMA_TARGET_PCI ||
            dma->target == NV15_DMA_TARGET_AGP;
@@ -1669,8 +1891,18 @@ static bool nv15_dma_read(NVIDIAQuadro2State *s, const NV15DMAObject *dma,
         return false;
     }
     address = dma->address + offset;
-    if (dma->target == NV15_DMA_TARGET_VRAM ||
-        dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+    if (dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+        for (uint64_t done = 0; done < size; ) {
+            uint64_t physical = nv15_tile_address(s, address + done);
+            uint64_t count = MIN(size - done, 16 - ((address + done) & 15));
+
+            memcpy((uint8_t *)buffer + done,
+                   s->vga.vram_ptr + physical, count);
+            done += count;
+        }
+        return true;
+    }
+    if (dma->target == NV15_DMA_TARGET_VRAM) {
         memcpy(buffer, s->vga.vram_ptr + address, size);
         return true;
     }
@@ -1691,8 +1923,21 @@ static bool nv15_dma_write(NVIDIAQuadro2State *s, const NV15DMAObject *dma,
         return false;
     }
     address = dma->address + offset;
-    if (dma->target == NV15_DMA_TARGET_VRAM ||
-        dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+    if (dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+        for (uint64_t done = 0; done < size; ) {
+            uint64_t physical = nv15_tile_address(s, address + done);
+            uint64_t count = MIN(size - done, 16 - ((address + done) & 15));
+
+            memcpy(s->vga.vram_ptr + physical,
+                   (const uint8_t *)buffer + done, count);
+            if (dirty) {
+                memory_region_set_dirty(&s->vga.vram, physical, count);
+            }
+            done += count;
+        }
+        return true;
+    }
+    if (dma->target == NV15_DMA_TARGET_VRAM) {
         memcpy(s->vga.vram_ptr + address, buffer, size);
         if (dirty && size) {
             memory_region_set_dirty(&s->vga.vram, address, size);
@@ -1893,6 +2138,10 @@ static void nv15_surface_mark_dirty(NVIDIAQuadro2State *s,
     uint64_t first;
     uint64_t last;
     uint64_t bytes;
+    uint64_t page_mask = qemu_target_page_size() - 1;
+    uint64_t run_start;
+    uint64_t run_end;
+    uint64_t row_bytes = (uint64_t)width * surface->cpp;
 
     if (!width || !height ||
         (surface->dma.target != NV15_DMA_TARGET_VRAM &&
@@ -1909,8 +2158,29 @@ static void nv15_surface_mark_dirty(NVIDIAQuadro2State *s,
     if (!nv15_dma_backing_range_valid(s, &surface->dma, first, bytes)) {
         return;
     }
-    memory_region_set_dirty(&s->vga.vram, surface->dma.address + first,
-                            bytes);
+    if (surface->dma.target == NV15_DMA_TARGET_VRAM_TILED) {
+        memory_region_set_dirty(&s->vga.vram, 0, s->vga.vram_size);
+        return;
+    }
+    first += surface->dma.address;
+    run_start = first & ~page_mask;
+    run_end = (first + row_bytes + page_mask) & ~page_mask;
+    for (uint32_t row = 1; row < height; row++) {
+        uint64_t address = first + (uint64_t)row * surface->pitch;
+        uint64_t start = address & ~page_mask;
+        uint64_t end = (address + row_bytes + page_mask) & ~page_mask;
+
+        if (start <= run_end) {
+            run_end = MAX(run_end, end);
+        } else {
+            memory_region_set_dirty(&s->vga.vram, run_start,
+                                    run_end - run_start);
+            run_start = start;
+            run_end = end;
+        }
+    }
+    run_end = MIN(run_end, s->vga.vram_size);
+    memory_region_set_dirty(&s->vga.vram, run_start, run_end - run_start);
 }
 
 static uint32_t nv15_pixel_mask(unsigned int cpp)
@@ -2030,6 +2300,70 @@ static bool nv15_operation_reads_destination(
     return ((rop ^ (rop >> 1)) & 0x55) != 0;
 }
 
+static uint8_t nv15_operation_rop(const NV15GraphicsObject *object,
+                                 const NV15ChannelContext *rop_context)
+{
+    return object->operation == 1 && rop_context ? rop_context->rop : 0xcc;
+}
+
+static bool nv15_pattern_constant(const NV15ChannelContext *pattern,
+                                  uint32_t *pixel)
+{
+    if (!pattern) {
+        *pixel = UINT32_MAX;
+    } else if (pattern->pattern_select != 1 ||
+               pattern->mono_color[0] == pattern->mono_color[1] ||
+               (pattern->mono_bitmap[0] == UINT32_MAX &&
+                pattern->mono_bitmap[1] == UINT32_MAX)) {
+        *pixel = pattern->mono_color[1];
+    } else if (!pattern->mono_bitmap[0] && !pattern->mono_bitmap[1]) {
+        *pixel = pattern->mono_color[0];
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* Called only after complete local VRAM rectangle validation. */
+static void nv15_surface_fill_rows(NVIDIAQuadro2State *s,
+                                   const NV15Surface *surface,
+                                   int32_t x, int32_t y,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t pixel)
+{
+    size_t row_bytes = (size_t)width * surface->cpp;
+    uint8_t *first = s->vga.vram_ptr + surface->dma.address + surface->offset +
+                     (uint64_t)y * surface->pitch + (uint64_t)x * surface->cpp;
+    uint8_t pattern[192];
+    bool same_byte = true;
+
+    stl_le_p(pattern, pixel);
+    for (unsigned int i = 1; i < surface->cpp; i++) {
+        same_byte &= pattern[i] == pattern[0];
+    }
+    if (!same_byte) {
+        for (size_t filled = surface->cpp; filled < sizeof(pattern);) {
+            size_t chunk = MIN(filled, sizeof(pattern) - filled);
+
+            memcpy(pattern + filled, pattern, chunk);
+            filled += chunk;
+        }
+    }
+    for (uint32_t row = 0; row < height; row++) {
+        uint8_t *dst = first + (size_t)row * surface->pitch;
+
+        if (same_byte) {
+            memset(dst, pattern[0], row_bytes);
+        } else {
+            /* CPU writes to an earlier row must not change the fill color. */
+            for (size_t pos = 0; pos < row_bytes; pos += sizeof(pattern)) {
+                memcpy(dst + pos, pattern,
+                       MIN(sizeof(pattern), row_bytes - pos));
+            }
+        }
+    }
+}
+
 static void nv15_clip_fill_rect(int32_t *x, int32_t *y,
                                 uint32_t *width, uint32_t *height)
 {
@@ -2089,6 +2423,16 @@ static bool nv15_context_clip_fill_rect(NVIDIAQuadro2State *s,
 static bool nv15_charge_work(NV15WorkBudget *budget, uint64_t bytes)
 {
     if (bytes > budget->bytes) {
+        /*
+         * Each primitive has its own size validation. Admit one bounded
+         * primitive even when it is larger than a scheduling quantum.
+         */
+        if (budget->bytes == NV15_MAX_PUSH_WORK_BYTES &&
+            bytes <= (uint64_t)NV15_MAX_2D_PIXELS * 20) {
+            budget->bytes = 0;
+            return true;
+        }
+        budget->exhausted = bytes <= (uint64_t)NV15_MAX_2D_PIXELS * 20;
         return false;
     }
     budget->bytes -= bytes;
@@ -2149,6 +2493,23 @@ static bool nv15_fill_rectangle(NVIDIAQuadro2State *s, unsigned int channel,
         return false;
     }
 
+    if (!read_destination && nv15_dma_is_vram(&destination.dma) &&
+        (uint64_t)width * destination.cpp <= destination.pitch) {
+        uint8_t rop = nv15_operation_rop(object, rop_context);
+        bool pattern_needed = ((rop ^ (rop >> 4)) & 0x0f) != 0;
+        uint32_t pattern_pixel = 0;
+
+        if (!pattern_needed || nv15_pattern_constant(pattern, &pattern_pixel)) {
+            uint32_t pixel = nv15_apply_operation(object, rop_context,
+                pattern_pixel, object->color, 0, destination.cpp);
+
+            nv15_surface_fill_rows(s, &destination, x, y, width, height, pixel);
+            nv15_surface_mark_dirty(s, &destination, x, y, width, height);
+            nv15_graphic_damage(s);
+            return true;
+        }
+    }
+
     for (iy = 0; iy < height; iy++) {
         for (ix = 0; ix < width; ix++) {
             uint32_t destination_pixel = 0;
@@ -2175,12 +2536,12 @@ static bool nv15_fill_rectangle(NVIDIAQuadro2State *s, unsigned int channel,
             }
         }
     }
-    graphic_hw_invalidate(s->vga.con);
+    nv15_graphic_damage(s);
     return true;
 
 fail:
     if (wrote) {
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -2333,7 +2694,7 @@ static bool nv15_draw_line(NVIDIAQuadro2State *s, unsigned int channel,
     if (wrote) {
         nv15_surface_mark_dirty(s, &destination, min_x, min_y,
                                 max_x - min_x + 1, max_y - min_y + 1);
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return true;
 
@@ -2341,7 +2702,7 @@ fail:
     if (wrote) {
         nv15_surface_mark_dirty(s, &destination, min_x, min_y,
                                 max_x - min_x + 1, max_y - min_y + 1);
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -2369,9 +2730,13 @@ static bool nv15_line_draw_to(NVIDIAQuadro2State *s, unsigned int channel,
     x0 = object->point_in;
     y0 = object->point_out;
 
-    /* A polyline continues from the newly submitted endpoint. */
+    if (!nv15_draw_line(s, channel, object, x0, y0, x, y, budget)) {
+        return false;
+    }
+
+    /* Keep the old endpoint until drawing succeeds, so a yield can retry. */
     nv15_line_set_vertex(object, x, y);
-    return nv15_draw_line(s, channel, object, x0, y0, x, y, budget);
+    return true;
 }
 
 static bool nv15_gdi_mono_data(NVIDIAQuadro2State *s, unsigned int channel,
@@ -2497,7 +2862,7 @@ static bool nv15_gdi_mono_data(NVIDIAQuadro2State *s, unsigned int channel,
     if (wrote) {
         nv15_surface_mark_dirty(s, &destination, min_x, min_y,
                                 max_x - min_x + 1, max_y - min_y + 1);
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return true;
 
@@ -2505,7 +2870,7 @@ fail:
     if (wrote) {
         nv15_surface_mark_dirty(s, &destination, min_x, min_y,
                                 max_x - min_x + 1, max_y - min_y + 1);
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -2607,6 +2972,10 @@ static bool nv15_blit_rectangles_overlap(const NV15Surface *source,
     if (!nv15_dma_share_backing(&source->dma, &destination->dma)) {
         return false;
     }
+    if (source->dma.target == NV15_DMA_TARGET_VRAM_TILED ||
+        destination->dma.target == NV15_DMA_TARGET_VRAM_TILED) {
+        return true;
+    }
     while (source_row < height && destination_row < height) {
         uint64_t source_address = source_start +
                                   (uint64_t)source_row * source->pitch;
@@ -2663,7 +3032,10 @@ static bool nv15_blit(NVIDIAQuadro2State *s, unsigned int channel,
     uint64_t destination_start;
     bool backwards;
     bool wrote = false;
-    uint64_t i;
+    bool read_source = true;
+    bool read_pattern = true;
+    bool local;
+    uint8_t rop;
 
     if (!surface_instance) {
         return false;
@@ -2706,9 +3078,20 @@ static bool nv15_blit(NVIDIAQuadro2State *s, unsigned int channel,
     if (!nv15_charge_work(budget, pixels * destination.cpp)) {
         return false;
     }
+    local = nv15_dma_is_vram(&source.dma) &&
+            nv15_dma_is_vram(&destination.dma);
+    rop = nv15_operation_rop(object, rop_context);
+    if (local) {
+        /* DMA/MMIO may change live context state; keep its original reads. */
+        read_source = ((rop ^ (rop >> 2)) & 0x33) != 0;
+        read_pattern = ((rop ^ (rop >> 4)) & 0x0f) != 0;
+    }
     source_start += source.dma.address;
     destination_start += destination.dma.address;
-    if ((source.pitch != destination.pitch ||
+    if (read_source &&
+        (source.dma.target == NV15_DMA_TARGET_VRAM_TILED ||
+         destination.dma.target == NV15_DMA_TARGET_VRAM_TILED ||
+         source.pitch != destination.pitch ||
          source.pitch < row_bytes || destination.pitch < row_bytes) &&
         nv15_blit_rectangles_overlap(&source, source_start, &destination,
                                      destination_start, width, height)) {
@@ -2729,52 +3112,141 @@ static bool nv15_blit(NVIDIAQuadro2State *s, unsigned int channel,
     }
     backwards = nv15_dma_share_backing(&source.dma, &destination.dma) &&
                 source_start < destination_start;
-    for (i = 0; i < pixels; i++) {
-        uint64_t position = backwards ? pixels - i - 1 : i;
-        uint32_t ix = position % width;
-        uint32_t iy = position / width;
-        uint32_t source_pixel;
-        uint32_t destination_pixel = 0;
-        uint32_t pattern_pixel;
-        uint32_t result;
+    if (local && rop == 0xcc && source.pitch >= row_bytes &&
+        destination.pitch >= row_bytes) {
+        for (uint32_t row = 0; row < height; row++) {
+            uint32_t iy = backwards ? height - 1 - row : row;
+            const uint8_t *src = source_snapshot ?
+                source_snapshot + (uint64_t)iy * row_bytes :
+                s->vga.vram_ptr + source_start + (uint64_t)iy * source.pitch;
+            uint8_t *dst = s->vga.vram_ptr + destination_start +
+                           (uint64_t)iy * destination.pitch;
 
-        if (source_snapshot) {
-            const uint8_t *bytes = source_snapshot + position * source.cpp;
+            memmove(dst, src, row_bytes);
+        }
+        nv15_surface_mark_dirty(s, &destination, dest_x, dest_y, width, height);
+        nv15_graphic_damage(s);
+        return true;
+    }
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t iy = backwards ? height - 1 - row : row;
 
-            source_pixel = source.cpp == 1 ? bytes[0] :
-                           source.cpp == 2 ? lduw_le_p(bytes) :
-                           ldl_le_p(bytes);
-        } else if (!nv15_surface_read_pixel(s, &source, source_x + ix,
-                                            source_y + iy, &source_pixel)) {
-            goto fail;
-        }
-        if (read_destination &&
-            !nv15_surface_read_pixel(s, &destination, dest_x + ix,
-                                     dest_y + iy, &destination_pixel)) {
-            goto fail;
-        }
-        pattern_pixel = nv15_pattern_pixel(pattern, dest_x + ix, dest_y + iy);
-        result = nv15_apply_operation(object, rop_context, pattern_pixel,
-                                      source_pixel, destination_pixel,
-                                      destination.cpp);
-        if (!nv15_surface_write_pixel(s, &destination, dest_x + ix,
-                                      dest_y + iy, result, false)) {
-            goto fail;
-        }
-        if (!wrote) {
-            nv15_surface_mark_dirty(s, &destination, dest_x, dest_y,
-                                    width, height);
-            wrote = true;
+        for (uint32_t col = 0; col < width; col++) {
+            uint32_t ix = backwards ? width - 1 - col : col;
+            uint32_t source_pixel = 0;
+            uint32_t destination_pixel = 0;
+            uint32_t pattern_pixel;
+            uint32_t result;
+
+            if (source_snapshot) {
+                const uint8_t *bytes = source_snapshot +
+                    (uint64_t)iy * row_bytes + (uint64_t)ix * source.cpp;
+
+                source_pixel = source.cpp == 1 ? bytes[0] :
+                               source.cpp == 2 ? lduw_le_p(bytes) :
+                               ldl_le_p(bytes);
+            } else if (read_source &&
+                       !nv15_surface_read_pixel(s, &source, source_x + ix,
+                                                source_y + iy, &source_pixel)) {
+                goto fail;
+            }
+            if (read_destination &&
+                !nv15_surface_read_pixel(s, &destination, dest_x + ix,
+                                         dest_y + iy, &destination_pixel)) {
+                goto fail;
+            }
+            pattern_pixel = read_pattern ?
+                nv15_pattern_pixel(pattern, dest_x + ix, dest_y + iy) : 0;
+            result = nv15_apply_operation(object, rop_context, pattern_pixel,
+                                          source_pixel, destination_pixel,
+                                          destination.cpp);
+            if (!nv15_surface_write_pixel(s, &destination, dest_x + ix,
+                                          dest_y + iy, result, false)) {
+                goto fail;
+            }
+            if (!wrote) {
+                nv15_surface_mark_dirty(s, &destination, dest_x, dest_y,
+                                        width, height);
+                wrote = true;
+            }
         }
     }
-    graphic_hw_invalidate(s->vga.con);
+    nv15_graphic_damage(s);
     return true;
 
 fail:
     if (wrote) {
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
+}
+
+static bool nv15_cpu_image_surface(NVIDIAQuadro2State *s,
+                                    NV15GraphicsObject *object,
+                                    NV15UploadCache *result)
+{
+    NV15UploadCache *cache = &s->upload_cache;
+    NV15GraphicsObject *surface = nv15_find_object(s, object->surface);
+    uint32_t key[ARRAY_SIZE(cache->key)];
+    uint32_t dma_instance;
+    uint32_t width;
+    uint32_t height;
+    unsigned int cpp;
+
+    if (!surface || surface->class_id != NV15_CLASS_CONTEXT_SURFACES_2D) {
+        cache->valid = false;
+        return false;
+    }
+    dma_instance = surface->dma_dest;
+    if (!dma_instance || !nv15_ramin_range_valid(dma_instance, 12)) {
+        cache->valid = false;
+        return false;
+    }
+    key[0] = object->format;
+    key[1] = object->upload_size_out;
+    key[2] = object->upload_size_in;
+    key[3] = object->surface;
+    key[4] = surface->format;
+    key[5] = surface->pitch;
+    key[6] = surface->offset_dest;
+    key[7] = dma_instance;
+    /*
+     * RAMIN aliases ordinary VRAM, which CPU and DMA can write directly.
+     * Validate the raw descriptor on every word, including cache hits.
+     */
+    key[8] = nv15_ramin_read32(s, dma_instance);
+    key[9] = nv15_ramin_read32(s, dma_instance + 4);
+    key[10] = nv15_ramin_read32(s, dma_instance + 8);
+    if (cache->valid && !memcmp(key, cache->key, sizeof(key))) {
+        *result = *cache;
+        return true;
+    }
+    cache->valid = false;
+    width = key[1] & 0xffff;
+    height = key[1] >> 16;
+    if (!width || !height || (uint64_t)width * height > NV15_MAX_2D_PIXELS) {
+        width = key[2] & 0xffff;
+        height = key[2] >> 16;
+    }
+    cpp = key[0] <= 3 ? 2 : key[0] <= 5 ? 4 : 0;
+    if (!cpp || !width || !height ||
+        (uint64_t)width * height > NV15_MAX_2D_PIXELS ||
+        nv15_surface_cpp(key[4]) != cpp || !(key[5] >> 16) ||
+        !nv15_dma_object_decode(key[8], key[9], key[10], true,
+                                 &cache->destination.dma)) {
+        return false;
+    }
+    cache->destination.format = key[4] & 0xff;
+    cache->destination.cpp = cpp;
+    cache->destination.pitch = key[5] >> 16;
+    cache->destination.offset = key[6];
+    memcpy(cache->key, key, sizeof(key));
+    cache->width = width;
+    cache->height = height;
+    cache->cpp = cpp;
+    cache->valid = true;
+    *result = *cache;
+    return true;
 }
 
 static bool nv15_cpu_image_data(NVIDIAQuadro2State *s,
@@ -2782,26 +3254,23 @@ static bool nv15_cpu_image_data(NVIDIAQuadro2State *s,
                                 NV15WorkBudget *budget)
 {
     NV15Surface destination;
+    NV15UploadCache upload;
     uint64_t total;
     uint64_t remaining;
-    uint32_t width = object->upload_size_out & 0xffff;
-    uint32_t height = object->upload_size_out >> 16;
+    uint32_t width;
+    uint32_t height;
     uint32_t pixels_per_word;
     uint32_t cpp;
     uint32_t i;
     bool wrote = false;
 
-    if (!width || !height || (uint64_t)width * height > NV15_MAX_2D_PIXELS) {
-        width = object->upload_size_in & 0xffff;
-        height = object->upload_size_in >> 16;
-    }
-    cpp = object->format <= 3 ? 2 : object->format <= 5 ? 4 : 0;
-    if (!cpp || !width || !height ||
-        (uint64_t)width * height > NV15_MAX_2D_PIXELS ||
-        !nv15_surface_load(s, object->surface, false, &destination) ||
-        destination.cpp != cpp) {
+    if (!nv15_cpu_image_surface(s, object, &upload)) {
         return false;
     }
+    destination = upload.destination;
+    width = upload.width;
+    height = upload.height;
+    cpp = upload.cpp;
     pixels_per_word = 4 / cpp;
     total = (uint64_t)width * height;
     if (object->upload_pixel >= total) {
@@ -2811,6 +3280,25 @@ static bool nv15_cpu_image_data(NVIDIAQuadro2State *s,
     if (!nv15_charge_work(budget,
                           MIN((uint64_t)pixels_per_word, remaining) * cpp)) {
         return false;
+    }
+    if (cpp == 2 && remaining >= 2 && nv15_dma_is_vram(&destination.dma) &&
+        object->upload_pixel % width + 1 < width) {
+        int32_t x = (int16_t)object->upload_point +
+                    (int32_t)(object->upload_pixel % width);
+        int32_t y = (int16_t)(object->upload_point >> 16) +
+                    (int32_t)(object->upload_pixel / width);
+        uint64_t offset;
+
+        if (nv15_surface_pixel_offset(&destination, x, y, &offset) &&
+            nv15_dma_backing_range_valid(s, &destination.dma, offset, 4)) {
+            uint64_t address = destination.dma.address + offset;
+
+            stl_le_p(s->vga.vram_ptr + address, value);
+            memory_region_set_dirty(&s->vga.vram, address, 4);
+            object->upload_pixel += 2;
+            nv15_graphic_damage(s);
+            return true;
+        }
     }
     for (i = 0; i < pixels_per_word; i++) {
         uint32_t position = object->upload_pixel++;
@@ -2833,12 +3321,12 @@ static bool nv15_cpu_image_data(NVIDIAQuadro2State *s,
             wrote = true;
         }
     }
-    graphic_hw_invalidate(s->vga.con);
+    nv15_graphic_damage(s);
     return true;
 
 fail:
     if (wrote) {
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -2899,37 +3387,29 @@ static uint32_t nv15_yuv_to_argb(uint8_t y, uint8_t u, uint8_t v)
            CLAMP(blue, 0, 255);
 }
 
-static bool nv15_scaled_read_source(NVIDIAQuadro2State *s,
-                                    const NV15DMAObject *source,
-                                    uint32_t source_offset,
-                                    uint32_t source_pitch,
-                                    uint32_t source_format,
-                                    uint32_t source_width,
-                                    uint32_t source_height,
-                                    int32_t x, int32_t y, uint32_t *argb)
+typedef struct NV15ScaledCacheEntry {
+    uint64_t offset;
+    uint8_t bytes[4];
+    uint32_t argb[2];
+    uint8_t decoded;
+} NV15ScaledCacheEntry;
+
+typedef struct NV15ScaledCache {
+    NV15ScaledCacheEntry entry[4];
+    unsigned int count;
+} NV15ScaledCache;
+
+static bool nv15_scaled_decode_source(uint32_t source_format, int32_t x,
+                                      const uint8_t bytes[4], uint32_t *argb)
 {
-    uint8_t bytes[4] = { 0 };
     unsigned int cpp = nv15_scaled_source_cpp(source_format);
     bool packed_yuv = (source_format & 0xff) == 5 ||
                       (source_format & 0xff) == 6;
-    uint64_t row;
-    uint64_t column;
-    uint64_t offset;
     uint32_t raw;
     uint32_t red;
     uint32_t green;
     uint32_t blue;
     uint32_t alpha = 0xff;
-
-    if (!cpp || x < 0 || y < 0 || x >= source_width || y >= source_height ||
-        umul64_overflow((uint64_t)y, source_pitch, &row) ||
-        umul64_overflow((uint64_t)(packed_yuv ? x & ~1 : x), cpp,
-                        &column) ||
-        uadd64_overflow(source_offset, row, &offset) ||
-        uadd64_overflow(offset, column, &offset) ||
-        !nv15_dma_read(s, source, offset, bytes, packed_yuv ? 4 : cpp)) {
-        return false;
-    }
 
     if (packed_yuv) {
         uint8_t y_sample;
@@ -2988,6 +3468,68 @@ static bool nv15_scaled_read_source(NVIDIAQuadro2State *s,
     return true;
 }
 
+static bool nv15_scaled_read_source(NVIDIAQuadro2State *s,
+                                    const NV15DMAObject *source,
+                                    uint32_t source_offset,
+                                    uint32_t source_pitch,
+                                    uint32_t source_format,
+                                    uint32_t source_width,
+                                    uint32_t source_height,
+                                    int32_t x, int32_t y, uint32_t *argb,
+                                    NV15ScaledCache *cache)
+{
+    uint8_t bytes[4] = { 0 };
+    unsigned int cpp = nv15_scaled_source_cpp(source_format);
+    bool packed_yuv = (source_format & 0xff) == 5 ||
+                      (source_format & 0xff) == 6;
+    unsigned int component = packed_yuv ? x & 1 : 0;
+    NV15ScaledCacheEntry *entry = NULL;
+    uint64_t row;
+    uint64_t column;
+    uint64_t offset;
+
+    if (!cpp || x < 0 || y < 0 || x >= source_width || y >= source_height ||
+        umul64_overflow((uint64_t)y, source_pitch, &row) ||
+        umul64_overflow((uint64_t)(packed_yuv ? x & ~1 : x), cpp, &column) ||
+        uadd64_overflow(source_offset, row, &offset) ||
+        uadd64_overflow(offset, column, &offset)) {
+        return false;
+    }
+    if (cache) {
+        for (unsigned int i = 0; i < cache->count; i++) {
+            if (cache->entry[i].offset == offset) {
+                entry = &cache->entry[i];
+                break;
+            }
+        }
+    }
+    if (entry) {
+        if (entry->decoded & BIT(component)) {
+            *argb = entry->argb[component];
+            return true;
+        }
+        memcpy(bytes, entry->bytes, sizeof(bytes));
+    } else {
+        if (!nv15_dma_read(s, source, offset, bytes, packed_yuv ? 4 : cpp)) {
+            return false;
+        }
+        if (cache && cache->count < ARRAY_SIZE(cache->entry)) {
+            entry = &cache->entry[cache->count++];
+            entry->offset = offset;
+            entry->decoded = 0;
+            memcpy(entry->bytes, bytes, sizeof(bytes));
+        }
+    }
+    if (!nv15_scaled_decode_source(source_format, x, bytes, argb)) {
+        return false;
+    }
+    if (entry) {
+        entry->argb[component] = *argb;
+        entry->decoded |= BIT(component);
+    }
+    return true;
+}
+
 static uint8_t nv15_scaled_lerp(uint8_t a, uint8_t b, uint32_t fraction)
 {
     return ((uint64_t)a * (NV15_SCALED_FIXED_ONE - fraction) +
@@ -3035,13 +3577,15 @@ static bool nv15_scaled_sample(NVIDIAQuadro2State *s,
     uint32_t p10;
     uint32_t p01;
     uint32_t p11;
+    NV15ScaledCache local_cache = { .count = 0 };
+    NV15ScaledCache *cache = nv15_dma_is_vram(source) ? &local_cache : NULL;
 
     if (!bilinear) {
         return nv15_scaled_read_source(s, source, source_offset,
                                        source_pitch, source_format,
                                        source_width, source_height,
                                        nv15_scaled_fixed_floor(u),
-                                       nv15_scaled_fixed_floor(v), argb);
+                                       nv15_scaled_fixed_floor(v), argb, NULL);
     }
     if (corner_origin) {
         u -= NV15_SCALED_FIXED_ONE / 2;
@@ -3059,16 +3603,16 @@ static bool nv15_scaled_sample(NVIDIAQuadro2State *s,
     y1 = CLAMP(y1, 0, (int32_t)source_height - 1);
     if (!nv15_scaled_read_source(s, source, source_offset, source_pitch,
                                  source_format, source_width, source_height,
-                                 x0, y0, &p00) ||
+                                 x0, y0, &p00, cache) ||
         !nv15_scaled_read_source(s, source, source_offset, source_pitch,
                                  source_format, source_width, source_height,
-                                 x1, y0, &p10) ||
+                                 x1, y0, &p10, cache) ||
         !nv15_scaled_read_source(s, source, source_offset, source_pitch,
                                  source_format, source_width, source_height,
-                                 x0, y1, &p01) ||
+                                 x0, y1, &p01, cache) ||
         !nv15_scaled_read_source(s, source, source_offset, source_pitch,
                                  source_format, source_width, source_height,
-                                 x1, y1, &p11)) {
+                                 x1, y1, &p11, cache)) {
         return false;
     }
     p00 = nv15_scaled_lerp_argb(p00, p10, fraction_x);
@@ -3234,12 +3778,12 @@ static bool nv15_scaled_image(NVIDIAQuadro2State *s, unsigned int channel,
             }
         }
     }
-    graphic_hw_invalidate(s->vga.con);
+    nv15_graphic_damage(s);
     return true;
 
 fail:
     if (wrote) {
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -3270,8 +3814,7 @@ static bool nv15_m2mf_read_line(NVIDIAQuadro2State *s,
     if (!nv15_dma_backing_range_valid(s, dma, offset, span)) {
         return false;
     }
-    if (dma->target == NV15_DMA_TARGET_VRAM ||
-        dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+    if (dma->target == NV15_DMA_TARGET_VRAM) {
         const uint8_t *source = s->vga.vram_ptr + dma->address + offset;
 
         for (i = 0; i < count; i++) {
@@ -3302,8 +3845,7 @@ static bool nv15_m2mf_write_line(NVIDIAQuadro2State *s,
     if (!nv15_dma_backing_range_valid(s, dma, offset, span)) {
         return false;
     }
-    if (dma->target == NV15_DMA_TARGET_VRAM ||
-        dma->target == NV15_DMA_TARGET_VRAM_TILED) {
+    if (dma->target == NV15_DMA_TARGET_VRAM) {
         uint64_t address = dma->address + offset;
         uint8_t *destination = s->vga.vram_ptr + address;
 
@@ -3394,12 +3936,12 @@ static bool nv15_m2mf_copy(NVIDIAQuadro2State *s,
         }
         wrote = true;
     }
-    graphic_hw_invalidate(s->vga.con);
+    nv15_graphic_damage(s);
     return true;
 
 fail:
     if (wrote) {
-        graphic_hw_invalidate(s->vga.con);
+        nv15_graphic_damage(s);
     }
     return false;
 }
@@ -3548,7 +4090,7 @@ static bool nv15_graphics_method(NVIDIAQuadro2State *s,
         return true;
     }
     if (method == NV15_GRAPH_WAIT_FOR_IDLE) {
-        /* TODO: Implement asynchronous PGRAPH execution and an idle wait. */
+        /* FIFO ordering guarantees that earlier primitives have completed. */
         return true;
     }
     if (method == NV15_GRAPH_DMA_NOTIFY) {
@@ -4192,7 +4734,7 @@ static bool nv15_fifo_method(NVIDIAQuadro2State *s, unsigned int channel,
     }
 
     instance = s->subchannel_instance[channel][subchannel];
-    object = nv15_find_object(s, instance);
+    object = nv15_bound_object(s, channel, subchannel);
     if (instance && !object) {
         /* PGRAPH reset drops contexts, while PFIFO retains its bindings. */
         object = nv15_rehydrate_channel_objects(s, channel, instance);
@@ -4406,7 +4948,12 @@ static void nv15_fifo_run_pusher(NVIDIAQuadro2State *s)
             }
             if (!nv15_fifo_method(s, channel, subchannel, method, word,
                                   &work)) {
-                nv15_fifo_cache_fault(s);
+                if (work.exhausted) {
+                    /* The method has not drawn anything: retry next quantum. */
+                    *dma_get -= sizeof(uint32_t);
+                } else {
+                    nv15_fifo_cache_fault(s);
+                }
                 break;
             }
             count--;
@@ -4440,9 +4987,27 @@ static void nv15_fifo_run_pusher(NVIDIAQuadro2State *s)
             break;
         }
     }
-    if (*dma_get != *dma_put && !budget &&
+    if (*dma_get != *dma_put && (!budget || work.exhausted) &&
         !(*dma_push & NV15_PFIFO_DMA_PUSH_STATUS)) {
-        nv15_fifo_pusher_fault(s, NV15_PFIFO_DMA_ERROR_MEMORY);
+        s->fifo_pending_channels |= BIT(channel);
+        qemu_bh_schedule(s->fifo_bh);
+    }
+    nv15_ramfc_save(s, channel);
+}
+
+static void nv15_fifo_resume(void *opaque)
+{
+    NVIDIAQuadro2State *s = opaque;
+    uint32_t pending = s->fifo_pending_channels;
+
+    s->fifo_pending_channels = 0;
+    while (pending) {
+        unsigned channel = ctz32(pending);
+
+        pending &= ~BIT(channel);
+        if (nv15_fifo_switch_channel(s, channel)) {
+            nv15_fifo_run_pusher(s);
+        }
     }
 }
 
@@ -4539,6 +5104,15 @@ static uint32_t nv15_mmio_read_word(NVIDIAQuadro2State *s, hwaddr addr)
     uint32_t *shadow;
     uint64_t timer;
 
+    if (addr >= NV15_PFB_BASE + 0x240 &&
+        addr < NV15_PFB_BASE + 0x2c0 && (addr & 15) == 12) {
+        unsigned int shift, factor;
+        uint32_t pitch = s->pfb[(addr - NV15_PFB_BASE - 4) >> 2];
+        uint32_t enabled = s->pfb[(addr - NV15_PFB_BASE - 12) >> 2] & BIT(31);
+
+        return nv15_tile_pitch(pitch, &shift, &factor) ?
+               enabled | (shift << 4) | factor : 0;
+    }
     switch (addr) {
     case NV15_PMC_BOOT_0:
         return NV15_BOOT_0_VALUE;
@@ -4572,6 +5146,8 @@ static void nv15_reset_engine(NVIDIAQuadro2State *s, uint32_t disabled)
 {
     /* TODO: Model PTIMER clock/reset gating through PMC_ENABLE bit 16. */
     if (disabled & NV15_PMC_ENABLE_PFIFO) {
+        qemu_bh_cancel(s->fifo_bh);
+        s->fifo_pending_channels = 0;
         memset(s->pfifo, 0, sizeof(s->pfifo));
         memset(s->subchannel_instance, 0, sizeof(s->subchannel_instance));
         memset(s->active_surface, 0, sizeof(s->active_surface));
@@ -4586,6 +5162,7 @@ static void nv15_reset_engine(NVIDIAQuadro2State *s, uint32_t disabled)
         memset(s->pgraph, 0, sizeof(s->pgraph));
         s->pgraph[(NV15_PGRAPH_FIFO_ACCESS - NV15_PGRAPH_BASE) >> 2] = 1;
         memset(s->objects, 0, sizeof(s->objects));
+        nv15_object_index_rebuild(s);
         nv15_channel_contexts_reset(s);
         memset(s->notify_pending, 0, sizeof(s->notify_pending));
         memset(s->notify_type, 0, sizeof(s->notify_type));
@@ -4622,6 +5199,17 @@ static void nv15_mmio_write_word(NVIDIAQuadro2State *s, hwaddr addr,
         return;
     }
 
+    if (addr >= NV15_PFB_BASE + 0x240 &&
+        addr < NV15_PFB_BASE + 0x2c0) {
+        unsigned int word = (addr & 15) >> 2;
+        uint32_t masks[] = { 0x87ffc000, 0x07ffc000, 0xff00, 0 };
+
+        if (word != 3) {
+            *shadow = ((*shadow & ~mask) | (value & mask)) & masks[word];
+            graphic_hw_invalidate(s->vga.con);
+        }
+        return;
+    }
     switch (addr) {
     case NV15_PMC_BOOT_0:
     case NV15_PMC_BOOT_1:
@@ -4636,6 +5224,7 @@ static void nv15_mmio_write_word(NVIDIAQuadro2State *s, hwaddr addr,
 
         *shadow = ((*shadow & ~mask) | (value & mask)) & UINT16_MAX;
         s->ptimer_legacy_clock = false;
+        nv15_ptimer_update_rate(s);
         s->ptimer_time_offset =
             (current - nv15_ptimer_scaled_clock_at(s, now)) &
             NV15_PTIMER_TIME_MASK;
@@ -4649,6 +5238,7 @@ static void nv15_mmio_write_word(NVIDIAQuadro2State *s, hwaddr addr,
 
         *shadow = (*shadow & ~mask) | (value & mask);
         s->ptimer_legacy_clock = false;
+        nv15_ptimer_update_rate(s);
         s->ptimer_time_offset =
             (current - nv15_ptimer_scaled_clock_at(s, now)) &
             NV15_PTIMER_TIME_MASK;
@@ -4663,6 +5253,7 @@ static void nv15_mmio_write_word(NVIDIAQuadro2State *s, hwaddr addr,
         uint32_t word;
 
         s->ptimer_legacy_clock = false;
+        nv15_ptimer_update_rate(s);
         if (addr == NV15_PTIMER_TIME_0) {
             word = (current & NV15_PTIMER_LOW_MASK) << 5;
             word = (word & ~mask) | (value & mask);
@@ -4980,6 +5571,11 @@ static int nv15_post_load(void *opaque, int version_id)
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     unsigned int i;
 
+    qemu_bh_cancel(s->fifo_bh);
+    if (version_id < 6) {
+        s->fifo_pending_channels = 0;
+    }
+    nv15_object_index_rebuild(s);
     if (version_id >= 5) {
         uint64_t expiry = timer_expire_time_ns(&s->ptimer_alarm_timer);
 
@@ -4988,6 +5584,7 @@ static int nv15_post_load(void *opaque, int version_id)
         s->ptimer[(NV15_PTIMER_DENOMINATOR - NV15_PTIMER_BASE) >> 2] &=
             UINT16_MAX;
 
+        nv15_ptimer_update_rate(s);
         s->ptimer_time_snapshot &= NV15_PTIMER_TIME_MASK;
         s->ptimer_time_offset =
             (s->ptimer_time_snapshot -
@@ -5006,8 +5603,9 @@ static int nv15_post_load(void *opaque, int version_id)
             UINT16_MAX;
         s->ptimer[(NV15_PTIMER_DENOMINATOR - NV15_PTIMER_BASE) >> 2] &=
             UINT16_MAX;
-        /* Older streams exposed the virtual nanosecond clock directly. */
+        /* Legacy streams express PTIMER in virtual nanoseconds. */
         s->ptimer_legacy_clock = true;
+        nv15_ptimer_update_rate(s);
         s->ptimer_time_offset = 0;
         s->ptimer_time_snapshot = 0;
         s->ptimer_clock_snapshot = 0;
@@ -5067,12 +5665,15 @@ static int nv15_post_load(void *opaque, int version_id)
     memset(&s->guest_cursor, 0, sizeof(s->guest_cursor));
     nv15_cursor_update_host(s);
     graphic_hw_invalidate(s->vga.con);
+    if (s->fifo_pending_channels) {
+        qemu_bh_schedule(s->fifo_bh);
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_nv15 = {
     .name = "nvidia-quadro2",
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .pre_save = nv15_pre_save,
     .post_load = nv15_post_load,
@@ -5129,6 +5730,7 @@ static const VMStateDescription vmstate_nv15 = {
                               NV15_USER_CHANNELS, 3),
         VMSTATE_UINT32_ARRAY_V(notify_dma_instance, NVIDIAQuadro2State,
                                NV15_USER_CHANNELS, 3),
+        VMSTATE_UINT32_V(fifo_pending_channels, NVIDIAQuadro2State, 6),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -5137,6 +5739,8 @@ static void nv15_reset(DeviceState *dev)
 {
     NVIDIAQuadro2State *s = NVIDIA_QUADRO2(dev);
 
+    qemu_bh_cancel(s->fifo_bh);
+    s->fifo_pending_channels = 0;
     timer_del(&s->vblank_timer);
     timer_del(&s->ptimer_alarm_timer);
     s->ptimer_time_offset = 0;
@@ -5167,6 +5771,7 @@ static void nv15_reset(DeviceState *dev)
     memset(s->surface_explicit, 0, sizeof(s->surface_explicit));
     memset(s->context_explicit, 0, sizeof(s->context_explicit));
     memset(s->objects, 0, sizeof(s->objects));
+    nv15_object_index_rebuild(s);
     s->rejected_methods = 0;
     s->active_channel = UINT8_MAX;
 
@@ -5198,6 +5803,7 @@ static void nv15_reset(DeviceState *dev)
     s->pramdac[(NV15_PRAMDAC_GENERAL_CONTROL - NV15_PRAMDAC_BASE) >> 2] =
         0x00100100;
 
+    nv15_ptimer_update_rate(s);
     vga_common_reset(&s->vga);
     s->vga.force_shadow = false;
     s->vga.cr[0x36] = BIT(2) | BIT(3);
@@ -5262,6 +5868,8 @@ static void nv15_realize(PCIDevice *dev, Error **errp)
                      s, "nvidia-quadro2-vga");
     portio_list_set_flush_coalesced(&s->vga_port_list);
     portio_list_add(&s->vga_port_list, pci_address_space_io(dev), 0x3b0);
+    s->fifo_bh = qemu_bh_new_guarded(nv15_fifo_resume, s,
+                                     &DEVICE(s)->mem_reentrancy_guard);
     vga->con = graphic_console_init(DEVICE(s), 0, &nv15_graphic_ops, s);
     if (s->cursor_guest_mode) {
         vga->cursor_invalidate = nv15_cursor_invalidate;
@@ -5297,6 +5905,8 @@ static void nv15_realize(PCIDevice *dev, Error **errp)
 static void nv15_exit(PCIDevice *dev)
 {
     NVIDIAQuadro2State *s = NVIDIA_QUADRO2(dev);
+
+    qemu_bh_delete(s->fifo_bh);
 
     timer_del(&s->vblank_timer);
     timer_del(&s->ptimer_alarm_timer);

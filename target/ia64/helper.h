@@ -45,8 +45,8 @@ DEF_HELPER_FLAGS_5(check_load_alat_addr, TCG_CALL_NO_WG, i64,
                    env, i32, i64, i32, i32)
 DEF_HELPER_FLAGS_5(check_load_alat_fp_addr, TCG_CALL_NO_WG, i64,
                    env, i32, i64, i32, i32)
-DEF_HELPER_1(alat_write_begin, void, env)
-DEF_HELPER_3(alat_write_end, void, env, i64, i32)
+DEF_HELPER_FLAGS_1(alat_write_begin, TCG_CALL_NO_RWG, void, env)
+DEF_HELPER_FLAGS_3(alat_write_end, TCG_CALL_NO_WG, void, env, i64, i32)
 DEF_HELPER_1(notify_alat_store, void, env)
 DEF_HELPER_1(alat_ensure_exclusive, void, env)
 DEF_HELPER_4(cloop_zero_st1, i64, env, i32, i32, i32)
@@ -130,6 +130,12 @@ DEF_HELPER_FLAGS_6(speculative_probe, TCG_CALL_NO_WG,
                    i64, env, i64, i32, i32, i32, i32)
 DEF_HELPER_FLAGS_3(speculative_int_probe, TCG_CALL_NO_WG,
                    i64, env, i64, i32)
+DEF_HELPER_FLAGS_3(speculative_int_probe_pa, TCG_CALL_NO_WG,
+                   i128, env, i64, i32)
+DEF_HELPER_FLAGS_6(speculative_probe_pa, TCG_CALL_NO_WG,
+                   i128, env, i64, i32, i32, i32, i32)
+DEF_HELPER_FLAGS_6(set_alat_pa, TCG_CALL_NO_WG, void,
+                   env, i32, i64, i32, i64, i64)
 DEF_HELPER_FLAGS_1(itc_read, TCG_CALL_NO_RWG, i64, env)
 DEF_HELPER_2(tak, i64, env, i64)
 DEF_HELPER_FLAGS_2(thash, TCG_CALL_NO_RWG_SE, i64, env, i64)

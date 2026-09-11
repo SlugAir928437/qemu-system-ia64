@@ -773,6 +773,15 @@ static bool ia64_external_interrupt_enabled(CPUIA64State *env)
     bool nmi_pending = env->interrupt.sapic_irr[0] & (1ULL << 2);
     bool interrupt_enabled = (env->psr & IA64_PSR_I) || nmi_pending;
 
+    if (!nmi_pending && env->exception_state.psr_i_deferred) {
+        /*
+         * Interrupt unmasking need not take effect immediately (SDM 5.8.2.1).
+         * The next native TB consumes this delay when execution begins;
+         * retries in the host execution loop must not consume it early.
+         */
+        return false;
+    }
+
     if ((env->psr & IA64_PSR_IS) && !nmi_pending) {
         uint32_t eflags = cpu_compute_eflags(&env->ia32);
         bool virtual_if = !(env->ar_cflg & (1ULL << 7)) ||
@@ -819,10 +828,44 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     bool rse_frame_complete = !cpu->env.rse.rse_cfle &&
         cpu->env.rse.rse_dirty >= 0 && cpu->env.rse.rse_dirty_nat >= 0;
 
-    if ((interrupt_request & CPU_INTERRUPT_HARD) &&
-        ia64_external_interrupt_enabled(&cpu->env) &&
-        ia64_sapic_has_pending(&cpu->env) &&
-        rse_frame_complete) {
+    if (!(interrupt_request & CPU_INTERRUPT_HARD) || !rse_frame_complete) {
+        return false;
+    }
+
+    if (cpu->env.pal.pal_mca_pending &&
+        ia64_ras_enter_mca(cpu)) {
+        return true;
+    }
+
+    if (ia64_sapic_has_init(&cpu->env) &&
+        !(cpu->env.psr & IA64_PSR_MC)) {
+        if (!ia64_ras_enter_init(cpu)) {
+            ia64_sapic_accept_init(&cpu->env);
+            if (cpu->boot_info_valid) {
+                ia64_cpu_reset_to_boot_info(cpu);
+            } else {
+                cpu_reset(cs);
+            }
+        }
+        return true;
+    }
+
+    if (ia64_sapic_has_pmi(&cpu->env) &&
+        (cpu->env.psr & IA64_PSR_IC) &&
+        cpu->env.pal.pal_pmi_entry != 0) {
+        int vector = ia64_sapic_accept_pmi(&cpu->env);
+
+        if (vector >= 0 && ia64_ras_enter_pmi(&cpu->env, vector)) {
+            return true;
+        }
+        if (vector >= 0) {
+            cpu->env.interrupt.sapic_pmi_pending |= 1U << vector;
+            ia64_sapic_update_interrupt(&cpu->env);
+        }
+    }
+
+    if (ia64_external_interrupt_enabled(&cpu->env) &&
+        ia64_sapic_has_pending(&cpu->env)) {
         cs->exception_index = IA64_EXCP_EXTINT;
         ia64_cpu_do_interrupt(cs);
         return true;

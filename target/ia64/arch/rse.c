@@ -294,9 +294,15 @@ static void ia64_rse_rnat_writeback_clear(CPUIA64State *env,
     memset(image, 0, sizeof(*image));
 }
 
-static int ia64_rse_rnat_shadow_find(const CPUIA64State *env, uint64_t addr)
+static int ia64_rse_rnat_shadow_lookup(const CPUIA64State *env, uint64_t addr)
 {
-    unsigned i;
+    unsigned i = env->rse.rse_rnat_shadow_last - 1;
+
+    if (i < env->rse.rse_rnat_shadow_count &&
+        env->rse.rse_rnat_shadow[i].valid &&
+        env->rse.rse_rnat_shadow[i].addr == addr) {
+        return i;
+    }
 
     for (i = 0; i < env->rse.rse_rnat_shadow_count; i++) {
         const IA64RnatShadowEntry *entry =
@@ -309,10 +315,19 @@ static int ia64_rse_rnat_shadow_find(const CPUIA64State *env, uint64_t addr)
     return -1;
 }
 
+static int ia64_rse_rnat_shadow_find(CPUIA64State *env, uint64_t addr)
+{
+    int slot = ia64_rse_rnat_shadow_lookup(env, addr);
+
+    env->rse.rse_rnat_shadow_last = slot + 1;
+    return slot;
+}
+
 static void ia64_rse_rnat_shadow_delete(CPUIA64State *env, unsigned slot)
 {
     unsigned last = --env->rse.rse_rnat_shadow_count;
 
+    env->rse.rse_rnat_shadow_last = 0;
     if (slot != last) {
         env->rse.rse_rnat_shadow[slot] =
             env->rse.rse_rnat_shadow[last];
@@ -326,6 +341,7 @@ static void ia64_rse_rnat_shadow_clear_all(CPUIA64State *env)
     memset(env->rse.rse_rnat_shadow, 0,
            sizeof(env->rse.rse_rnat_shadow));
     env->rse.rse_rnat_shadow_count = 0;
+    env->rse.rse_rnat_shadow_last = 0;
 }
 
 static void ia64_rse_rnat_shadow_remove(CPUIA64State *env, uint64_t addr,
@@ -347,7 +363,7 @@ static void ia64_rse_rnat_shadow_overlay(const CPUIA64State *env,
                                          uint64_t addr, uint64_t *value,
                                          uint64_t *defined)
 {
-    int slot = ia64_rse_rnat_shadow_find(env, addr);
+    int slot = ia64_rse_rnat_shadow_lookup(env, addr);
 
     if (slot >= 0) {
         const IA64RnatShadowEntry *entry =
@@ -412,6 +428,7 @@ static void ia64_rse_rnat_shadow_merge(CPUIA64State *env, uint64_t addr,
     }
     entry->value &= entry->defined & INT64_MAX;
     entry->defined &= INT64_MAX;
+    env->rse.rse_rnat_shadow_last = slot + 1;
     trace_ia64_rse_rnat_shadow(env_cpu(env)->cpu_index, operation, env->ip,
                                slot, entry->addr, entry->value,
                                entry->defined);
@@ -1200,6 +1217,90 @@ ia64_rse_sync_frame_in(CPUIA64State *env)
     ia64_rse_sync_frame_in_slow(env);
 }
 
+void ia64_rse_save_context(CPUIA64State *env,
+                           IA64RSEContextState *state)
+{
+    ia64_rse_sync_frame_out(env);
+    memcpy(state->pgr, env->rse.rse_pgr, sizeof(state->pgr));
+    memcpy(state->pgr_nat, env->rse.rse_pgr_nat, sizeof(state->pgr_nat));
+    memcpy(state->gr_dirty, env->rse.rse_gr_dirty,
+           sizeof(state->gr_dirty));
+    state->bsp = env->ar_bsp;
+    state->bspstore = env->ar_bspstore;
+    state->rnat = env->ar_rnat;
+    state->bol = env->rse.rse_bol;
+    state->dirty = env->rse.rse_dirty;
+    state->dirty_nat = env->rse.rse_dirty_nat;
+    state->clean = env->rse.rse_clean;
+    state->clean_nat = env->rse.rse_clean_nat;
+    state->invalid = env->rse.rse_invalid;
+    state->rnat_addr = env->rse.rse_rnat_addr;
+    state->rnat_defined = env->rse.rse_rnat_defined;
+    state->load_rnat = env->rse.rse_load_rnat;
+    state->load_rnat_addr = env->rse.rse_load_rnat_addr;
+    state->load_rnat_defined = env->rse.rse_load_rnat_defined;
+    state->load_rnat_valid = env->rse.rse_load_rnat_valid;
+    state->writeback_rnat = env->rse.rse_writeback_rnat;
+    memcpy(state->rnat_shadow, env->rse.rse_rnat_shadow,
+           sizeof(state->rnat_shadow));
+    state->rnat_shadow_count = env->rse.rse_rnat_shadow_count;
+    state->cfm_sof = env->cfm_sof;
+    state->cfm_sol = env->cfm_sol;
+    state->cfm_sor = env->cfm_sor;
+    state->cfm_rrb_gr = env->cfm_rrb_gr;
+    state->cfm_rrb_fr = env->cfm_rrb_fr;
+    state->cfm_rrb_pr = env->cfm_rrb_pr;
+    state->cfle = env->rse.rse_cfle;
+    state->completion_pending = env->rse.rse_completion_pending;
+    state->completion_demoted = env->rse.rse_completion_demoted;
+    state->completion_psr = env->rse.rse_completion_psr;
+    state->completion_source_ip = env->rse.rse_completion_source_ip;
+    state->completion_source_slot = env->rse.rse_completion_source_slot;
+}
+
+void ia64_rse_restore_context(CPUIA64State *env,
+                              const IA64RSEContextState *state)
+{
+    memcpy(env->rse.rse_pgr, state->pgr, sizeof(state->pgr));
+    memcpy(env->rse.rse_pgr_nat, state->pgr_nat, sizeof(state->pgr_nat));
+    memcpy(env->rse.rse_gr_dirty, state->gr_dirty,
+           sizeof(state->gr_dirty));
+    env->ar_bsp = state->bsp;
+    env->ar_bspstore = state->bspstore;
+    env->ar_rnat = state->rnat;
+    env->rse.rse_bol = state->bol;
+    env->rse.rse_dirty = state->dirty;
+    env->rse.rse_dirty_nat = state->dirty_nat;
+    env->rse.rse_clean = state->clean;
+    env->rse.rse_clean_nat = state->clean_nat;
+    env->rse.rse_invalid = state->invalid;
+    env->rse.rse_rnat_addr = state->rnat_addr;
+    env->rse.rse_rnat_defined = state->rnat_defined;
+    env->rse.rse_load_rnat = state->load_rnat;
+    env->rse.rse_load_rnat_addr = state->load_rnat_addr;
+    env->rse.rse_load_rnat_defined = state->load_rnat_defined;
+    env->rse.rse_load_rnat_valid = state->load_rnat_valid;
+    env->rse.rse_writeback_rnat = state->writeback_rnat;
+    memcpy(env->rse.rse_rnat_shadow, state->rnat_shadow,
+           sizeof(env->rse.rse_rnat_shadow));
+    env->rse.rse_rnat_shadow_count = state->rnat_shadow_count;
+    env->cfm_sof = state->cfm_sof;
+    env->cfm_sol = state->cfm_sol;
+    env->cfm_sor = state->cfm_sor;
+    env->cfm_rrb_gr = state->cfm_rrb_gr;
+    ia64_set_cfm_rrb_fr(env, state->cfm_rrb_fr);
+    ia64_set_cfm_rrb_pr(env, state->cfm_rrb_pr);
+    env->rse.rse_cfle = state->cfle;
+    env->rse.rse_access = false;
+    env->rse.rse_completion_pending = state->completion_pending;
+    env->rse.rse_completion_demoted = state->completion_demoted;
+    env->rse.rse_completion_psr = state->completion_psr;
+    env->rse.rse_completion_source_ip = state->completion_source_ip;
+    env->rse.rse_completion_source_slot = state->completion_source_slot;
+    ia64_rse_sync_frame_in(env);
+    ia64_rse_check(env, "context-restore");
+}
+
 /*
  * Perform one mandatory RSE store at AR.BSPSTORE, spilling either the
  * oldest dirty register or, when BSPSTORE{8:3} is all ones, the RNAT
@@ -1737,6 +1838,11 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_complete_frame_loads(env, 0);
     ia64_rse_check(env, "return");
+}
+
+void ia64_rse_return_from_min_state(CPUIA64State *env, uint64_t cfm)
+{
+    ia64_rse_return_to_frame(env, cfm, cfm & IA64_CFM_SOF_MASK);
 }
 
 #ifdef CONFIG_DEBUG_TCG

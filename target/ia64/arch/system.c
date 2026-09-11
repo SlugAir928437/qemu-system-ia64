@@ -834,6 +834,10 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         env->cr[cr_num] = value;
         ia64_itm_update(env, env->cr[IA64_CR_ITM]);
         break;
+    case IA64_CR_CMCV:
+        env->cr[cr_num] = value;
+        ia64_ras_update_cmc(env);
+        break;
     default:
         env->cr[cr_num] = value;
         break;
@@ -1152,13 +1156,24 @@ static void ia64_swap_banked_gr(CPUIA64State *env)
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value)
 {
-    if ((env->psr ^ value) & IA64_PSR_IC) {
+    uint64_t changed = env->psr ^ value;
+
+    if (changed & IA64_PSR_IC) {
         env->exception_state.psr_ic_inflight = true;
     }
-    if ((env->psr ^ value) & IA64_PSR_BN) {
+    if (!(value & IA64_PSR_I) || (value & IA64_PSR_IS)) {
+        env->exception_state.psr_i_deferred = false;
+    } else if ((changed & IA64_PSR_I) &&
+               env->exception_state.psr_ic_inflight) {
+        env->exception_state.psr_i_deferred = true;
+    }
+    if (changed & IA64_PSR_BN) {
         ia64_swap_banked_gr(env);
     }
     env->psr = value;
+    if (changed & (IA64_PSR_I | IA64_PSR_IC | IA64_PSR_MC | IA64_PSR_IS)) {
+        ia64_sapic_update_interrupt(env);
+    }
 }
 
 void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr)

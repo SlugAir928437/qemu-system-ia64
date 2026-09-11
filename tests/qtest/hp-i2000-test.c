@@ -12,6 +12,8 @@
 #include "hw/ia64/hp_i2000.h"
 #include "hw/ia64/ia64_i2000_profile_abi.h"
 #include "hw/ia64/ia64_platform_abi.h"
+#include "hw/ia64/ia64_ras_abi.h"
+#include "hw/ia64/intel_460gx_chipset.h"
 #include "hw/misc/iommu-testdev.h"
 #include "hw/pci/pci.h"
 #include "hw/scsi/isp12160_abi.h"
@@ -24,8 +26,8 @@
 #include "qobject/qlist.h"
 
 #define TEST_FIRMWARE_ENV "QTEST_IA64_FIRMWARE"
-#define HP_I2000_LOW_DESCRIPTOR_SIZE  952U
-#define HP_I2000_HIGH_DESCRIPTOR_SIZE 968U
+#define HP_I2000_LOW_DESCRIPTOR_SIZE  1768U
+#define HP_I2000_HIGH_DESCRIPTOR_SIZE 1784U
 #define HP_I2000_RAGE128_ROM_BASE     UINT64_C(0x000c0000)
 #define HP_I2000_QUADRO2_BMP_OFFSET   UINT64_C(0x00000600)
 #define HP_I2000_RAGE128_ROM_SIZE     0x0800U
@@ -121,11 +123,41 @@
 #define HP_I2000_PID_IOREGSEL          0x00U
 #define HP_I2000_PID_IOWIN             0x10U
 #define HP_I2000_PID_RTE_BASE          0x10U
+#define HP_I2000_CHIPSET_BUS           4U
 #define HP_I2000_DMA_TEST_SLOT         6U
 #define HP_I2000_DMA_TEST_LEN          4U
 #define HP_I2000_DMA_TEST_SENTINEL     UINT32_C(0xa5a5a5a5)
 #define HP_I2000_DMA_TEST_LOW_RAM      UINT64_C(0x00040000)
 #define HP_I2000_ISP12160_IO_BAR       UINT32_C(0x00005000)
+#define HP_I2000_IHPC0_MMIO_BAR        UINT64_C(0xa0020000)
+#define HP_I2000_IHPC1_MMIO_BAR        UINT64_C(0xb0020000)
+#define HP_I2000_IHPC_CFG_SLOT_ID       0x40U
+#define HP_I2000_IHPC_CFG_MISC          0x42U
+#define HP_I2000_IHPC_CFG_INDEX         0x50U
+#define HP_I2000_IHPC_CFG_DATA          0x54U
+#define HP_I2000_IHPC_CFG_INDEX_ENABLE  BIT(7)
+#define HP_I2000_IHPC_MISC_RESERVED_ONE BIT(6)
+#define HP_I2000_IHPC_MISC_SERR_POWER_FAULT BIT(14)
+#define HP_I2000_IHPC_MISC_POWER_FAULT_ENABLE BIT(10)
+#define HP_I2000_IHPC_MISC_SOGO          BIT(0)
+#define HP_I2000_IHPC_SLOT_ID            0x16U
+#define HP_I2000_IHPC_INPUTS             0x08U
+#define HP_I2000_IHPC_INPUT_MASK         0x0cU
+#define HP_I2000_IHPC_MMIO_SLOT_ID       0x28U
+#define HP_I2000_IHPC_CFG_POWER_FAULT_SERR 0x49U
+#define HP_I2000_460GX_SAC_FERR          0x40U
+#define HP_I2000_460GX_SAC_NERR          0x44U
+#define HP_I2000_460GX_WXB_FERR          0x83U
+#define HP_I2000_460GX_SDC_FERR          0x80U
+#define HP_I2000_460GX_SDC_NERR          0x84U
+#define HP_I2000_460GX_SDC_CARD_A_TXINFO 0x69U
+#define HP_I2000_460GX_MAC_FERR          0x98U
+#define HP_I2000_IHPC_SLOT_COUNT         2U
+#define HP_I2000_SAL_RECORD_HEADER_SIZE  40U
+#define HP_I2000_SAL_SECTION_HEADER_SIZE 24U
+#define HP_I2000_SAL_PCI_BUS_ID_OFFSET   18U
+#define HP_I2000_SAL_PCI_ADDRESS_OFFSET  24U
+#define HP_I2000_SAL_PCI_REQUESTER_OFFSET 48U
 #define HP_I2000_CS4281_BA1            UINT32_C(0x98000000)
 #define HP_I2000_CS4281_BA0            UINT32_C(0x98010000)
 #define HP_I2000_CS4281_HISR           0x0000U
@@ -173,6 +205,7 @@
 #define HP_I2000_CS4281_ACSDA          0x047cU
 #define HP_I2000_CS4281_ACSTS2         0x04e4U
 #define HP_I2000_CS4281_SSPM           0x0740U
+#define HP_I2000_CS4281_SRCSA          0x075cU
 #define HP_I2000_CS4281_PPLVC          0x0760U
 #define HP_I2000_CS4281_ACCTL_TC       BIT(6)
 #define HP_I2000_CS4281_ACCTL_CRW      BIT(4)
@@ -180,12 +213,17 @@
 #define HP_I2000_CS4281_ACCTL_VFRM     BIT(2)
 #define HP_I2000_CS4281_ACCTL_ESYN     BIT(1)
 #define HP_I2000_CS4281_DMR_DMA        BIT(29)
+#define HP_I2000_CS4281_DMR_MONO       BIT(17)
+#define HP_I2000_CS4281_DMR_SIZE8      BIT(16)
 #define HP_I2000_CS4281_DMR_AUTO       BIT(4)
 #define HP_I2000_CS4281_DMR_TR_WRITE   (1U << 2)
 #define HP_I2000_CS4281_DMR_TR_READ    (2U << 2)
 #define HP_I2000_CS4281_DCR_HTCIE      BIT(17)
 #define HP_I2000_CS4281_DCR_TCIE       BIT(16)
 #define HP_I2000_CS4281_FCR_FEN        BIT(31)
+#define HP_I2000_CS4281_FCR_PLAYBACK   (0U << 16 | 1U << 24)
+#define HP_I2000_CS4281_FCR_CAPTURE    (10U << 16 | 11U << 24)
+#define HP_I2000_CS4281_FCR_UNROUTED   (31U << 16 | 31U << 24)
 #define HP_I2000_CS4281_HDSR_DHTC      BIT(17)
 #define HP_I2000_CS4281_HDSR_DTC       BIT(16)
 #define HP_I2000_CS4281_HDSR_DRUN      BIT(15)
@@ -651,6 +689,7 @@ static void hp_i2000_cs4281_init(QTestState *qts)
                  HP_I2000_CS4281_ACCTL_ESYN);
     g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_ACISV), ==, 3);
     qtest_writel(qts, ba0 + HP_I2000_CS4281_ACOSV, 3);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_SRCSA, 0x0b0a0100);
 }
 
 static uint16_t hp_i2000_cs4281_codec_read(QTestState *qts, uint8_t reg)
@@ -1252,7 +1291,7 @@ static void test_hp_i2000_machine_identity(void)
 
         if (g_str_equal(qdict_get_str(machine, "name"), "hp-i2000")) {
             g_assert_cmpstr(qdict_get_str(machine, "default-cpu-type"), ==,
-                            "merced-ia64-cpu");
+                            "merced-800-ia64-cpu");
             g_assert_cmpint(qdict_get_int(machine, "cpu-max"), ==, 2);
             g_assert_cmpstr(qdict_get_str(machine, "default-ram-id"), ==,
                             "hp-i2000.ram");
@@ -1393,14 +1432,18 @@ static void test_hp_i2000_pci_dma_ram_map(void)
 {
     static const struct {
         uint8_t bus;
+        uint8_t port;
+        uint8_t error_offset;
         uint64_t mmio_base;
     } roots[] = {
-        { 0x00, UINT64_C(0x98000000) },
-        { 0x01, UINT64_C(0xa8000000) },
-        { 0x02, UINT64_C(0xb8000000) },
-        { 0x03, UINT64_C(0xe6000000) },
+        { 0x00, INTEL_460GX_PXB_PORT, 0x44, UINT64_C(0x98000000) },
+        { 0x01, INTEL_460GX_WXB0_PORT, 0x83, UINT64_C(0xa8000000) },
+        { 0x02, INTEL_460GX_WXB1_PORT, 0x83, UINT64_C(0xb8000000) },
+        { 0x03, INTEL_460GX_GXB_PORT, 0x84, UINT64_C(0xe6000000) },
     };
     const unsigned int devfn = PCI_DEVFN(HP_I2000_DMA_TEST_SLOT, 0);
+    const uint64_t ras_bank = IA64_RAS_HUB_DEFAULT_BASE +
+        ia64_ras_record_bank_offset(0, IA64_RAS_RECORD_TYPE_MCA);
     const uint64_t high_ram = HP_I2000_HIGH_RAM_BASE;
     uint64_t mmio_base = 0;
     uint8_t bus = 0;
@@ -1424,6 +1467,8 @@ static void test_hp_i2000_pci_dma_ram_map(void)
         }
     }
     g_assert_cmpuint(root, <, G_N_ELEMENTS(roots));
+    g_test_message("DMA test device uses root %u, bus %u, port %u",
+                   root, bus, roots[root].port);
     hp_i2000_config_writel(qts, bus, devfn, PCI_BASE_ADDRESS_0,
                            mmio_base);
     hp_i2000_config_writew(qts, bus, devfn, PCI_COMMAND,
@@ -1460,6 +1505,228 @@ static void test_hp_i2000_pci_dma_ram_map(void)
                     MEMTX_DECODE_ERROR);
     g_assert_cmphex(qtest_readl(qts, high_ram), ==,
                     HP_I2000_DMA_TEST_SENTINEL);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS,
+                        PCI_DEVFN(INTEL_460GX_CHIPSET_EXPANDER_DEVICE_BASE +
+                                  roots[root].port, 1),
+                        roots[root].error_offset) & BIT(3),
+                    ==, BIT(3));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, PCI_DEVFN(0, 1),
+                        HP_I2000_460GX_SAC_FERR) & BIT(29),
+                    ==, BIT(29));
+    g_assert_cmphex(qtest_readq(
+                        qts, ras_bank + IA64_RAS_RECORD_REG_STATUS) &
+                        IA64_RAS_RECORD_STATUS_PRESENT,
+                    ==, IA64_RAS_RECORD_STATUS_PRESENT);
+    g_assert_cmphex(qtest_readq(
+                        qts, ras_bank + IA64_RAS_RECORD_DATA +
+                             HP_I2000_SAL_RECORD_HEADER_SIZE +
+                             HP_I2000_SAL_SECTION_HEADER_SIZE +
+                             HP_I2000_SAL_PCI_ADDRESS_OFFSET),
+                    ==, HP_I2000_LOW_RAM_LIMIT);
+    g_assert_cmphex(qtest_readq(
+                        qts, ras_bank + IA64_RAS_RECORD_DATA +
+                             HP_I2000_SAL_RECORD_HEADER_SIZE +
+                             HP_I2000_SAL_SECTION_HEADER_SIZE +
+                             HP_I2000_SAL_PCI_REQUESTER_OFFSET),
+                    ==, PCI_BUILD_BDF(bus, devfn));
+    qtest_quit(qts);
+}
+
+static void hp_i2000_cs4281_dma_transfer(QTestState *qts, unsigned channel,
+                                         bool capture, bool interrupt)
+{
+    const uint64_t ba0 = HP_I2000_CS4281_BA0;
+    const uint32_t dma_base = 0x40000 + channel * 0x1000;
+    const unsigned dma_reg = channel * 0x10;
+    const unsigned control_reg = channel * 8;
+    const unsigned fifo_reg = channel * 4;
+    const uint32_t direction = capture ? HP_I2000_CS4281_DMR_TR_WRITE :
+                                        HP_I2000_CS4281_DMR_TR_READ;
+    const uint32_t irq_mask = HP_I2000_CS4281_HISR_DMAI | BIT(8 + channel);
+    uint8_t samples[64 * 4];
+    uint8_t result[sizeof(samples)];
+    uint32_t hdsr;
+    unsigned i;
+
+    memset(samples, 0xa5, sizeof(samples));
+    qtest_memwrite(qts, dma_base, samples, sizeof(samples));
+    qtest_writel(qts, dma_base - 4, 0x12345678);
+    qtest_writel(qts, dma_base + sizeof(samples), 0x87654321);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0 + control_reg, 0);
+    (void)qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0 + fifo_reg);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA0 + dma_reg, dma_base);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBC0 + dma_reg, 63);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR0 + control_reg,
+                 interrupt ? HP_I2000_CS4281_DCR_HTCIE |
+                             HP_I2000_CS4281_DCR_TCIE : 0);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR0 + fifo_reg,
+                 HP_I2000_CS4281_FCR_FEN | HP_I2000_CS4281_FCR_UNROUTED);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_HIMR, 0x7fffffff & ~irq_mask);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_HICR, 3);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0 + control_reg,
+                 HP_I2000_CS4281_DMR_DMA | direction);
+
+    /* DMA cannot consume an unassigned serial slot. */
+    qtest_clock_step(qts, 50000000);
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA0 + dma_reg),
+                    ==, dma_base);
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HISR) & irq_mask,
+                    ==, 0);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR0 + fifo_reg,
+                 HP_I2000_CS4281_FCR_FEN |
+                 (capture ? HP_I2000_CS4281_FCR_CAPTURE :
+                            HP_I2000_CS4281_FCR_PLAYBACK));
+
+    /* Pending half-count status must not stop transfer to terminal count. */
+    for (i = 0; i < 1000; i++) {
+        qtest_clock_step(qts, 1000000);
+        if (!(qtest_readl(qts, ba0 + HP_I2000_CS4281_DMR0 + control_reg) &
+              HP_I2000_CS4281_DMR_DMA)) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 1000);
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA0 + dma_reg),
+                    ==, dma_base + sizeof(samples));
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCC0 + dma_reg),
+                    ==, 0);
+    if (interrupt) {
+        hp_i2000_cs4281_wait_hisr(qts, irq_mask);
+    }
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HISR) & irq_mask,
+                    ==, interrupt ? irq_mask : 0);
+    g_assert_cmphex(hp_i2000_config_readw(qts, 0, PCI_DEVFN(4, 0),
+                                         PCI_STATUS) & PCI_STATUS_INTERRUPT,
+                    ==, interrupt ? PCI_STATUS_INTERRUPT : 0);
+    hdsr = qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0 + fifo_reg);
+    g_assert_cmphex(hdsr, ==,
+                    HP_I2000_CS4281_HDSR_DHTC | HP_I2000_CS4281_HDSR_DTC);
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HISR) & irq_mask,
+                    ==, 0);
+    qtest_memread(qts, dma_base, result, sizeof(result));
+    if (capture) {
+        memset(samples, 0, sizeof(samples));
+    }
+    g_assert_cmpmem(result, sizeof(result), samples, sizeof(samples));
+    g_assert_cmphex(qtest_readl(qts, dma_base - 4), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, dma_base + sizeof(samples)), ==,
+                    0x87654321);
+}
+
+static void test_hp_i2000_cs4281_dma(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    const uint64_t ba0 = HP_I2000_CS4281_BA0;
+    const uint32_t dma_base = 0x50000;
+    uint8_t samples[64 * 4];
+    uint8_t result[sizeof(samples)];
+    unsigned channel;
+    unsigned i;
+
+    hp_i2000_cs4281_init(qts);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    for (channel = 0; channel < 4; channel++) {
+        hp_i2000_cs4281_dma_transfer(qts, channel, false, true);
+        hp_i2000_cs4281_dma_transfer(qts, channel, true, true);
+    }
+    hp_i2000_cs4281_dma_transfer(qts, 2, false, false);
+    hp_i2000_cs4281_dma_transfer(qts, 3, true, false);
+
+    /* Automatic reload continues across unacknowledged period interrupts. */
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA0 + 3 * 0x10, dma_base);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBC0 + 3 * 0x10, 63);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR0 + 3 * 8,
+                 HP_I2000_CS4281_DCR_HTCIE | HP_I2000_CS4281_DCR_TCIE);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0 + 3 * 8,
+                 HP_I2000_CS4281_DMR_DMA | HP_I2000_CS4281_DMR_AUTO |
+                 HP_I2000_CS4281_DMR_TR_WRITE);
+    memset(samples, 0xa5, sizeof(samples));
+    for (i = 0; i < 2; i++) {
+        qtest_memwrite(qts, dma_base, samples, sizeof(samples));
+        qtest_clock_step(qts, 50000000);
+        qtest_memread(qts, dma_base, result, sizeof(result));
+        g_assert_cmpmem(result, sizeof(result),
+                        (uint8_t[sizeof(result)]) { 0 }, sizeof(result));
+    }
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DMR0 + 3 * 8) &
+                    HP_I2000_CS4281_DMR_DMA, ==, HP_I2000_CS4281_DMR_DMA);
+    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0 + 3 * 4) &
+                    (HP_I2000_CS4281_HDSR_DHTC | HP_I2000_CS4281_HDSR_DTC),
+                    ==, HP_I2000_CS4281_HDSR_DHTC | HP_I2000_CS4281_HDSR_DTC);
+    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0 + 3 * 8, 0);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_cs4281_handoff(void)
+{
+    QTestState *qts = hp_i2000_start_with_options("-display vnc=none");
+    const uint64_t ba0 = HP_I2000_CS4281_BA0;
+    unsigned channel, i;
+
+    hp_i2000_cs4281_init(qts);
+    for (channel = 0; channel < 4; channel++) {
+        bool capture = channel & 1;
+        bool mono = channel >= 2;
+        uint32_t dma_base = 0x40000 + channel * 0x1000;
+        unsigned bytes = 64 * (mono ? 1 : 4);
+
+        qtest_memset(qts, dma_base, 0xa5, bytes);
+        qtest_writel(qts, dma_base - 4, 0x12345678);
+        qtest_writel(qts, dma_base + bytes, 0x87654321);
+        qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA0 + channel * 0x10,
+                     dma_base);
+        qtest_writel(qts, ba0 + HP_I2000_CS4281_DBC0 + channel * 0x10, 63);
+        qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR0 + channel * 8,
+                     HP_I2000_CS4281_DCR_HTCIE | HP_I2000_CS4281_DCR_TCIE);
+        qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR0 + channel * 4,
+                     HP_I2000_CS4281_FCR_FEN |
+                     (capture ? (10U << 16) | ((mono ? 31U : 11U) << 24) :
+                                HP_I2000_CS4281_FCR_PLAYBACK));
+        qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0 + channel * 8,
+                     HP_I2000_CS4281_DMR_DMA |
+                     (capture ? HP_I2000_CS4281_DMR_TR_WRITE :
+                                HP_I2000_CS4281_DMR_TR_READ) |
+                     (mono ? HP_I2000_CS4281_DMR_MONO |
+                             HP_I2000_CS4281_DMR_SIZE8 : 0));
+    }
+
+    /* Each direction hands off from stereo 16-bit to mono 8-bit PCM. */
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    for (i = 0; i < 1000; i++) {
+        uint32_t running = 0;
+
+        qtest_clock_step(qts, 1000000);
+        for (channel = 0; channel < 4; channel++) {
+            running |= qtest_readl(qts, ba0 + HP_I2000_CS4281_DMR0 +
+                                        channel * 8);
+        }
+        if (!(running & HP_I2000_CS4281_DMR_DMA)) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 1000);
+    for (channel = 0; channel < 4; channel++) {
+        uint32_t dma_base = 0x40000 + channel * 0x1000;
+        unsigned bytes = 64 * (channel >= 2 ? 1 : 4);
+        uint8_t expected[256], result[256];
+
+        g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA0 +
+                                         channel * 0x10), ==, dma_base + bytes);
+        g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0 +
+                                         channel * 4), ==,
+                        HP_I2000_CS4281_HDSR_DHTC | HP_I2000_CS4281_HDSR_DTC);
+        memset(expected, (channel & 1) ? 0 : 0xa5, bytes);
+        qtest_memread(qts, dma_base, result, bytes);
+        g_assert_cmpmem(result, bytes, expected, bytes);
+        g_assert_cmphex(qtest_readl(qts, dma_base - 4), ==, 0x12345678);
+        g_assert_cmphex(qtest_readl(qts, dma_base + bytes), ==, 0x87654321);
+    }
+    qtest_system_reset(qts);
+    hp_i2000_cs4281_init(qts);
+    hp_i2000_cs4281_dma_transfer(qts, 2, false, true);
+    hp_i2000_cs4281_dma_transfer(qts, 3, true, true);
     qtest_quit(qts);
 }
 
@@ -1469,9 +1736,6 @@ static void test_hp_i2000_cs4281(void)
     const uint64_t ba0 = HP_I2000_CS4281_BA0;
     const uint64_t ba1 = HP_I2000_CS4281_BA1;
     const uint32_t dma_base = 0x00040000;
-    uint8_t samples[64 * 4] = { 0 };
-    uint8_t captured[sizeof(samples) / 2];
-    uint32_t hdsr;
     uint16_t status;
 
     QTestState *qts = hp_i2000_start("2G");
@@ -1563,98 +1827,11 @@ static void test_hp_i2000_cs4281(void)
     qtest_writel(qts, ba1 + 0x40, 0x5a4281a5);
     g_assert_cmphex(qtest_readl(qts, ba1 + 0x40), ==, 0x5a4281a5);
 
-    /* Stereo S16 playback reaches half and terminal count through PCI DMA. */
-    qtest_memwrite(qts, dma_base, samples, sizeof(samples));
     hp_i2000_pid_write(qts, hp_i2000_pid_rte_low(16), 0x61);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA0, dma_base);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBC0, 63);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0,
-                 HP_I2000_CS4281_DMR_AUTO |
-                 HP_I2000_CS4281_DMR_TR_READ);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR0,
-                 HP_I2000_CS4281_DCR_HTCIE |
-                 HP_I2000_CS4281_DCR_TCIE);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR0,
-                 HP_I2000_CS4281_FCR_FEN);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_HIMR,
-                 0x7fffffff & ~(HP_I2000_CS4281_HISR_DMAI |
-                                HP_I2000_CS4281_HISR_DMA0));
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_HICR, 3);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0,
-                 HP_I2000_CS4281_DMR_DMA |
-                 HP_I2000_CS4281_DMR_AUTO |
-                 HP_I2000_CS4281_DMR_TR_READ);
     qtest_qmp_assert_success(qts, "{'execute':'cont'}");
-
-    g_assert_cmphex(hp_i2000_cs4281_wait_hisr(
-                        qts, HP_I2000_CS4281_HISR_DMAI |
-                             HP_I2000_CS4281_HISR_DMA0) & BIT(31), ==,
-                    BIT(31));
+    hp_i2000_cs4281_dma_transfer(qts, 0, false, true);
     g_assert_true(hp_i2000_sapic_irr_wait_for_vector(qts, 0x61));
-    hdsr = qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0);
-    g_assert_cmphex(hdsr & (HP_I2000_CS4281_HDSR_DHTC |
-                           HP_I2000_CS4281_HDSR_DRUN |
-                           HP_I2000_CS4281_HDSR_RQ), ==,
-                    HP_I2000_CS4281_HDSR_DHTC |
-                    HP_I2000_CS4281_HDSR_DRUN |
-                    HP_I2000_CS4281_HDSR_RQ);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA0), ==,
-                    dma_base + sizeof(samples) / 2);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCC0), ==, 31);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_HISR) &
-                    (HP_I2000_CS4281_HISR_DMAI |
-                     HP_I2000_CS4281_HISR_DMA0), ==, 0);
-
-    hp_i2000_cs4281_wait_hisr(qts, HP_I2000_CS4281_HISR_DMAI |
-                                   HP_I2000_CS4281_HISR_DMA0);
-    hdsr = qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR0);
-    g_assert_cmphex(hdsr & (HP_I2000_CS4281_HDSR_DTC |
-                           HP_I2000_CS4281_HDSR_DRUN |
-                           HP_I2000_CS4281_HDSR_RQ), ==,
-                    HP_I2000_CS4281_HDSR_DTC |
-                    HP_I2000_CS4281_HDSR_DRUN |
-                    HP_I2000_CS4281_HDSR_RQ);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA0), ==,
-                    dma_base);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCC0), ==, 63);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR0, 0);
-
-    /* The capture engine writes silence from the null backend into RAM. */
-    memset(samples, 0xa5, sizeof(samples));
-    qtest_memwrite(qts, dma_base + 0x1000, samples, sizeof(samples));
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA1, dma_base + 0x1000);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DBC1, 63);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR1,
-                 HP_I2000_CS4281_DMR_AUTO |
-                 HP_I2000_CS4281_DMR_TR_WRITE);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR1,
-                 HP_I2000_CS4281_DCR_HTCIE |
-                 HP_I2000_CS4281_DCR_TCIE);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR1,
-                 HP_I2000_CS4281_FCR_FEN);
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_HIMR,
-                 0x7fffffff & ~(HP_I2000_CS4281_HISR_DMAI |
-                                HP_I2000_CS4281_HISR_DMA1));
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR1,
-                 HP_I2000_CS4281_DMR_DMA |
-                 HP_I2000_CS4281_DMR_AUTO |
-                 HP_I2000_CS4281_DMR_TR_WRITE);
-    hp_i2000_cs4281_wait_hisr(qts, HP_I2000_CS4281_HISR_DMAI |
-                                   HP_I2000_CS4281_HISR_DMA1);
-    hdsr = qtest_readl(qts, ba0 + HP_I2000_CS4281_HDSR1);
-    g_assert_cmphex(hdsr & (HP_I2000_CS4281_HDSR_DHTC |
-                           HP_I2000_CS4281_HDSR_DRUN |
-                           HP_I2000_CS4281_HDSR_RQ), ==,
-                    HP_I2000_CS4281_HDSR_DHTC |
-                    HP_I2000_CS4281_HDSR_DRUN |
-                    HP_I2000_CS4281_HDSR_RQ);
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCA1), ==,
-                    dma_base + 0x1000 + sizeof(captured));
-    g_assert_cmphex(qtest_readl(qts, ba0 + HP_I2000_CS4281_DCC1), ==, 31);
-    qtest_memread(qts, dma_base + 0x1000, captured, sizeof(captured));
-    g_assert_cmpmem(captured, sizeof(captured),
-                    (uint8_t[sizeof(captured)]) { 0 }, sizeof(captured));
-    qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR1, 0);
+    hp_i2000_cs4281_dma_transfer(qts, 1, true, true);
     qtest_qmp_assert_success(qts, "{'execute':'stop'}");
 
     qtest_writel(qts, ba0 + HP_I2000_CS4281_DBA2, dma_base);
@@ -1664,7 +1841,7 @@ static void test_hp_i2000_cs4281(void)
                  HP_I2000_CS4281_DMR_TR_READ);
     qtest_writel(qts, ba0 + HP_I2000_CS4281_DCR2, 0);
     qtest_writel(qts, ba0 + HP_I2000_CS4281_FCR2,
-                 HP_I2000_CS4281_FCR_FEN);
+                 HP_I2000_CS4281_FCR_FEN | HP_I2000_CS4281_FCR_PLAYBACK);
     qtest_writel(qts, ba0 + HP_I2000_CS4281_DMR2,
                  HP_I2000_CS4281_DMR_DMA |
                  HP_I2000_CS4281_DMR_AUTO |
@@ -1700,6 +1877,14 @@ static void test_hp_i2000_cs4281(void)
 static void test_hp_i2000_pci_layout_and_reset(void)
 {
     QTestState *qts = hp_i2000_start("2G");
+    static const uint64_t ihpc_bar[] = {
+        HP_I2000_IHPC0_MMIO_BAR,
+        HP_I2000_IHPC1_MMIO_BAR,
+    };
+    static const uint32_t ihpc_inputs[] = {
+        UINT32_C(0x3f3f3f3f),
+        UINT32_C(0x3f3f3f3f),
+    };
     static const uint8_t expander_device[] = { 0x10, 0x12, 0x13, 0x14 };
     static const uint16_t expander_id[] = { 0x84cb, 0x84e6,
                                             0x84e6, 0x84ea };
@@ -1708,6 +1893,12 @@ static void test_hp_i2000_pci_layout_and_reset(void)
     static const uint8_t sac_function_mask[] = {
         BIT(0) | BIT(1) | BIT(2),
         BIT(2) | BIT(3),
+    };
+    static const uint8_t sac_pmd_offsets[] = {
+        0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8,
+    };
+    static const uint8_t sac_pmc_offsets[] = {
+        0xd0, 0xd8, 0xe0, 0xe8, 0xf0, 0xf8,
     };
     unsigned int function;
     unsigned int expander;
@@ -1786,6 +1977,39 @@ static void test_hp_i2000_pci_layout_and_reset(void)
                                  0x8086, 0x123f, 0x01,
                                  PCI_CLASS_SYSTEM_PCI_HOTPLUG,
                                  0x8086, 0x123f);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            PCI_BASE_ADDRESS_0), ==, ihpc_bar[function]);
+        g_assert_cmphex(hp_i2000_config_readw(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            PCI_COMMAND), ==, PCI_COMMAND_MEMORY);
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            PCI_INTERRUPT_LINE), ==, 20 + function * 4);
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            HP_I2000_IHPC_CFG_SLOT_ID), ==,
+                        HP_I2000_IHPC_SLOT_ID);
+        g_assert_cmphex(qtest_readl(qts, ihpc_bar[function] +
+                                         HP_I2000_IHPC_INPUTS), ==,
+                        ihpc_inputs[function]);
+        g_assert_cmphex(qtest_readl(qts, ihpc_bar[function] +
+                                         HP_I2000_IHPC_INPUT_MASK), ==,
+                        UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, ihpc_bar[function] +
+                                         HP_I2000_IHPC_MMIO_SLOT_ID), ==,
+                        HP_I2000_IHPC_SLOT_ID);
+
+        hp_i2000_config_writew(
+            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+            HP_I2000_IHPC_CFG_MISC, HP_I2000_IHPC_CFG_INDEX_ENABLE);
+        hp_i2000_config_writel(
+            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+            HP_I2000_IHPC_CFG_INDEX, HP_I2000_IHPC_INPUTS);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            HP_I2000_IHPC_CFG_DATA), ==,
+                        ihpc_inputs[function]);
     }
 
     for (expander = 0; expander < 2; expander++) {
@@ -1807,10 +2031,29 @@ static void test_hp_i2000_pci_layout_and_reset(void)
     hp_i2000_assert_identity(qts, 4, PCI_DEVFN(4, 0),
                              0x8086, 0x84e1, 0x03,
                              PCI_CLASS_BRIDGE_HOST, 0x8086, 0x84e1);
+    for (expander = 0; expander < 2; expander++) {
+        for (function = 0; function < 2; function++) {
+            hp_i2000_assert_identity(qts, 4,
+                                     PCI_DEVFN(5 + expander, function),
+                                     0x8086, 0x84e3, 0x03,
+                                     PCI_CLASS_MEMORY_RAM,
+                                     0x8086, 0x84e3);
+        }
+    }
     for (expander = 0; expander < 8; expander++) {
-        hp_i2000_assert_identity(qts, 4, PCI_DEVFN(0x10 + expander, 0),
-                                 0x8086, 0x84e0, 0x03,
-                                 PCI_CLASS_BRIDGE_HOST, 0x8086, 0x84e0);
+        if (expander == 0 || expander == 2 ||
+            expander == 3 || expander == 4) {
+            hp_i2000_assert_identity(
+                qts, 4, PCI_DEVFN(0x10 + expander, 0),
+                0x8086, 0x84e0, 0x03,
+                PCI_CLASS_BRIDGE_HOST, 0x8086, 0x84e0);
+        } else {
+            g_assert_cmphex(hp_i2000_config_readl(
+                                qts, 4,
+                                PCI_DEVFN(0x10 + expander, 0),
+                                PCI_VENDOR_ID),
+                            ==, UINT32_MAX);
+        }
     }
     for (expander = 0; expander < G_N_ELEMENTS(expander_device);
          expander++) {
@@ -1822,6 +2065,62 @@ static void test_hp_i2000_pci_layout_and_reset(void)
     hp_i2000_assert_identity(qts, 4, PCI_DEVFN(0x14, 2),
                              0x8086, 0x84e2, 0x02,
                              PCI_CLASS_BRIDGE_OTHER, 0x8086, 0x84e2);
+
+    for (function = 0; function < G_N_ELEMENTS(sac_pmd_offsets);
+         function++) {
+        uint8_t offset = sac_pmd_offsets[function];
+
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(0, 2), offset,
+                               UINT32_MAX);
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(0, 2), offset + 4,
+                               UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(0, 2), offset), ==,
+                        UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(0, 2), offset + 4), ==,
+                        UINT32_C(0x000000ff));
+    }
+    for (function = 0; function < G_N_ELEMENTS(sac_pmc_offsets);
+         function++) {
+        uint8_t offset = sac_pmc_offsets[function];
+
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(0, 2), offset,
+                               UINT32_MAX);
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(0, 2), offset + 4,
+                               UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(0, 2), offset), ==,
+                        UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(0, 2), offset + 4), ==,
+                        UINT32_C(0x000001ff));
+    }
+    hp_i2000_config_writel(qts, 4, PCI_DEVFN(4, 0), 0x98, UINT32_MAX);
+    hp_i2000_config_writel(qts, 4, PCI_DEVFN(4, 0), 0x9c, UINT32_MAX);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 4, PCI_DEVFN(4, 0), 0x98), ==,
+                    UINT32_C(0x0001ff7f));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 4, PCI_DEVFN(4, 0), 0x9c), ==,
+                    UINT32_C(0x0001ff7f));
+    for (function = 0; function < 2; function++) {
+        uint8_t offset = 0xa0 + function * 8;
+
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(4, 0), offset,
+                               UINT32_MAX);
+        hp_i2000_config_writel(qts, 4, PCI_DEVFN(4, 0), offset + 4,
+                               UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(4, 0), offset), ==,
+                        UINT32_MAX);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 4, PCI_DEVFN(4, 0), offset + 4), ==,
+                        UINT32_C(0x000000ff));
+    }
+    hp_i2000_config_writeb(qts, 4, PCI_DEVFN(0x12, 1), 0x46, 0xff);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, 4, PCI_DEVFN(0x12, 1), 0x46), ==, 0xbc);
 
     g_assert_cmphex(hp_i2000_config_readw(
                         qts, 0, PCI_DEVFN(3, 0), PCI_COMMAND), ==, 0x0007);
@@ -1906,6 +2205,19 @@ static void test_hp_i2000_pci_layout_and_reset(void)
     g_assert_cmphex(qtest_readb(qts, HP_I2000_CF8_PA + 1), ==, 0x5a);
     g_assert_cmphex(qtest_readw(qts, HP_I2000_CF8_PA + 2), ==, 0xa55a);
     qtest_system_reset(qts);
+    for (function = 0; function < 2; function++) {
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            PCI_BASE_ADDRESS_0), ==, ihpc_bar[function]);
+        g_assert_cmphex(hp_i2000_config_readw(
+                            qts, 1 + function, PCI_DEVFN(0x0f, 0),
+                            HP_I2000_IHPC_CFG_MISC), ==, 2);
+        g_assert_cmphex(qtest_readl(qts, ihpc_bar[function] +
+                                         HP_I2000_IHPC_INPUTS), ==,
+                        ihpc_inputs[function]);
+    }
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 4, PCI_DEVFN(0, 2), 0x90), ==, 0);
     g_assert_cmphex(hp_i2000_config_readw(
                         qts, 0, PCI_DEVFN(3, 0), PCI_COMMAND), ==, 0x0007);
     g_assert_cmphex(hp_i2000_config_readw(
@@ -1934,6 +2246,418 @@ static void test_hp_i2000_pci_layout_and_reset(void)
                     HP_I2000_I82559_MMIO_BAR);
     g_assert_cmphex(qtest_readb(qts, HP_I2000_CF8_PA + 1), ==, 0);
     g_assert_cmphex(qtest_readw(qts, HP_I2000_CF8_PA + 2), ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_chipset_routing_registers(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    const unsigned int bootstrap = PCI_DEVFN(0x10, 0);
+    const unsigned int wxb = PCI_DEVFN(0x12, 1);
+    const unsigned int ihpc = PCI_DEVFN(0x0f, 0);
+    uint32_t devnpres;
+
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, 0, bootstrap, INTEL_460GX_SAC_CBN_OFFSET),
+                    ==, HP_I2000_CHIPSET_BUS);
+    devnpres = hp_i2000_config_readl(
+        qts, 0, bootstrap, INTEL_460GX_SAC_DEVNPRES_OFFSET);
+    g_assert_cmphex(devnpres & MAKE_64BIT_MASK(0x10, 8),
+                    ==, BIT(0x11) | BIT(0x15) |
+                        BIT(0x16) | BIT(0x17));
+
+    hp_i2000_config_writeb(qts, 0, bootstrap,
+                           INTEL_460GX_SAC_CBN_OFFSET, 5);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 4, PCI_DEVFN(0, 0), PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 5, PCI_DEVFN(0, 0), PCI_VENDOR_ID),
+                    ==, 0x8086);
+
+    hp_i2000_config_writeb(qts, 0, bootstrap,
+                           INTEL_460GX_SAC_CBN_OFFSET, 2);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, 0, bootstrap, INTEL_460GX_SAC_CBN_OFFSET),
+                    ==, 2);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 2, PCI_DEVFN(0, 0), PCI_VENDOR_ID),
+                    ==, 0x8086);
+    hp_i2000_config_writeb(qts, 0, bootstrap,
+                           INTEL_460GX_SAC_CBN_OFFSET, 5);
+
+    hp_i2000_config_writel(qts, 5, PCI_DEVFN(0, 0),
+                           INTEL_460GX_SAC_DEVNPRES_OFFSET,
+                           devnpres | BIT(INTEL_460GX_CHIPSET_SDC_DEVICE));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 5,
+                        PCI_DEVFN(INTEL_460GX_CHIPSET_SDC_DEVICE, 0),
+                        PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+    hp_i2000_config_writel(qts, 5, PCI_DEVFN(0, 0),
+                           INTEL_460GX_SAC_DEVNPRES_OFFSET, devnpres);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 5,
+                        PCI_DEVFN(INTEL_460GX_CHIPSET_SDC_DEVICE, 0),
+                        PCI_VENDOR_ID),
+                    ==, 0x8086);
+
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 5, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                    ==, 0x0101);
+    hp_i2000_config_writew(qts, 5, wxb,
+                           INTEL_460GX_XXB_BUSNO_OFFSET, 0x0006);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 5, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                    ==, 0x0101);
+    hp_i2000_config_writew(qts, 5, wxb,
+                           INTEL_460GX_XXB_BUSNO_OFFSET, 0x0606);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, ihpc, PCI_VENDOR_ID),
+                    ==, UINT32_MAX);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 6, ihpc, PCI_VENDOR_ID),
+                    ==, 0x8086);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, 0, bootstrap, INTEL_460GX_SAC_CBN_OFFSET),
+                    ==, HP_I2000_CHIPSET_BUS);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 4, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                    ==, 0x0101);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, ihpc, PCI_VENDOR_ID),
+                    ==, 0x8086);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_ihpc_fault_route(void)
+{
+    static const char * const ihpc_path[HP_I2000_IHPC_SLOT_COUNT] = {
+        "/machine/ihpc0",
+        "/machine/ihpc1",
+    };
+    static const uint64_t ihpc_bar[HP_I2000_IHPC_SLOT_COUNT] = {
+        HP_I2000_IHPC0_MMIO_BAR,
+        HP_I2000_IHPC1_MMIO_BAR,
+    };
+    static const uint8_t port[HP_I2000_IHPC_SLOT_COUNT] = {
+        INTEL_460GX_WXB0_PORT,
+        INTEL_460GX_WXB1_PORT,
+    };
+    const uint64_t ras_bank = IA64_RAS_HUB_DEFAULT_BASE +
+        ia64_ras_record_bank_offset(0, IA64_RAS_RECORD_TYPE_MCA);
+    QTestState *qts = hp_i2000_start("2G");
+    unsigned int i;
+
+    for (i = 0; i < HP_I2000_IHPC_SLOT_COUNT; i++) {
+        uint8_t bus = i + 1;
+        uint8_t device = INTEL_460GX_CHIPSET_EXPANDER_DEVICE_BASE + port[i];
+        uint16_t misc = HP_I2000_IHPC_MISC_RESERVED_ONE |
+                        HP_I2000_IHPC_MISC_SERR_POWER_FAULT |
+                        HP_I2000_IHPC_MISC_POWER_FAULT_ENABLE |
+                        HP_I2000_IHPC_MISC_SOGO;
+
+        hp_i2000_config_writew(
+            qts, bus, PCI_DEVFN(0x0f, 0), PCI_COMMAND,
+            PCI_COMMAND_MEMORY | PCI_COMMAND_SERR);
+        qtest_set_irq_in(qts, ihpc_path[i],
+                         "slot-present", 0, 1);
+        qtest_writeb(qts, ihpc_bar[i] + 1, BIT(0));
+        qtest_writew(qts, ihpc_bar[i] + 2, misc);
+        qtest_set_irq_in(qts, ihpc_path[i],
+                         "power-fault", 0, 1);
+
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, bus, PCI_DEVFN(0x0f, 0),
+                            HP_I2000_IHPC_CFG_POWER_FAULT_SERR) & BIT(0),
+                        ==, BIT(0));
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, HP_I2000_CHIPSET_BUS,
+                            PCI_DEVFN(device, 1),
+                            HP_I2000_460GX_WXB_FERR) & 0x81,
+                        ==, 0x81);
+        g_assert_cmphex(hp_i2000_config_readl(
+                            qts, HP_I2000_CHIPSET_BUS, PCI_DEVFN(0, 1),
+                            HP_I2000_460GX_SAC_FERR) & BIT(29),
+                        ==, BIT(29));
+        g_assert_cmphex(qtest_readq(
+                            qts, ras_bank + IA64_RAS_RECORD_REG_STATUS) &
+                            IA64_RAS_RECORD_STATUS_PRESENT,
+                        ==, IA64_RAS_RECORD_STATUS_PRESENT);
+        g_assert_cmpuint((qtest_readq(
+                              qts, ras_bank + IA64_RAS_RECORD_DATA + 8) >>
+                          16) & 0xff,
+                         ==, IA64_RAS_SAL_STATUS_FATAL);
+        g_assert_cmpuint((qtest_readq(
+                              qts, ras_bank + IA64_RAS_RECORD_DATA +
+                                   HP_I2000_SAL_RECORD_HEADER_SIZE +
+                                   HP_I2000_SAL_SECTION_HEADER_SIZE + 16) >>
+                          ((HP_I2000_SAL_PCI_BUS_ID_OFFSET - 16) * 8)) &
+                         0xffff,
+                         ==, bus);
+        g_assert_cmphex(qtest_readq(
+                            qts, ras_bank + IA64_RAS_RECORD_DATA +
+                                 HP_I2000_SAL_RECORD_HEADER_SIZE +
+                                 HP_I2000_SAL_SECTION_HEADER_SIZE +
+                                 HP_I2000_SAL_PCI_REQUESTER_OFFSET),
+                        ==, PCI_BUILD_BDF(bus, PCI_DEVFN(0x0f, 0)));
+
+        qtest_writeq(qts, ras_bank + IA64_RAS_RECORD_REG_CLEAR,
+                     IA64_RAS_RECORD_CLEAR_VALUE);
+        qtest_set_irq_in(qts, ihpc_path[i],
+                         "power-fault", 0, 0);
+        qtest_set_irq_in(qts, ihpc_path[i],
+                         "slot-present", 0, 0);
+    }
+    g_assert_cmphex(qtest_readq(
+                        qts, ras_bank + IA64_RAS_RECORD_REG_STATUS),
+                    ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_ihpc_endpoint_lifecycle(void)
+{
+    const unsigned int function0 = PCI_DEVFN(1, 0);
+    const unsigned int function1 = PCI_DEVFN(1, 1);
+    QTestState *qts;
+
+    if (!qtest_has_device("pci-testdev")) {
+        g_test_skip("pci-testdev is unavailable");
+        return;
+    }
+
+    qts = hp_i2000_start("2G");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function1",
+        "{'bus':'pci.1','addr':'1.1'}");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function0",
+        "{'bus':'pci.1','addr':'1.0',"
+        "'multifunction':true}");
+
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, function0, PCI_VENDOR_ID), ==, UINT32_MAX);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, function1, PCI_VENDOR_ID), ==, UINT32_MAX);
+
+    qtest_writeb(qts, HP_I2000_IHPC0_MMIO_BAR + 1, BIT(0));
+    qtest_writew(qts, HP_I2000_IHPC0_MMIO_BAR + 2,
+                 HP_I2000_IHPC_MISC_RESERVED_ONE |
+                 HP_I2000_IHPC_MISC_SOGO);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function0, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function1, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function0, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function1, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+
+    qtest_qmp_device_del_send(qts, "ihpc-function0");
+    qtest_writeb(qts, HP_I2000_IHPC0_MMIO_BAR + 1, 0);
+    qtest_writew(qts, HP_I2000_IHPC0_MMIO_BAR + 2,
+                 HP_I2000_IHPC_MISC_RESERVED_ONE |
+                 HP_I2000_IHPC_MISC_SOGO);
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, function0, PCI_VENDOR_ID), ==, UINT32_MAX);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, function1, PCI_VENDOR_ID), ==, UINT32_MAX);
+    qtest_quit(qts);
+}
+
+typedef struct HP460GXMemoryErrorCase {
+    const char *name;
+    unsigned int card;
+    unsigned int mac;
+    Intel460GXMemoryError error;
+    uint32_t sac_status;
+    uint8_t sdc_status;
+    uint8_t mac_status;
+    unsigned int record_type;
+    unsigned int severity;
+} HP460GXMemoryErrorCase;
+
+static void test_hp_i2000_memory_error(const void *opaque)
+{
+    const HP460GXMemoryErrorCase *test = opaque;
+    const uint64_t bank = IA64_RAS_HUB_DEFAULT_BASE +
+        ia64_ras_record_bank_offset(0, test->record_type);
+    QTestState *qts = hp_i2000_start("2G");
+    uint8_t device = INTEL_460GX_CHIPSET_MEMORY_CARD_A_DEVICE + test->card;
+
+    if (test->record_type == IA64_RAS_RECORD_TYPE_CPE) {
+        qtest_writeq(qts,
+                     IA64_RAS_HUB_DEFAULT_BASE + IA64_RAS_REG_CPE_VECTOR,
+                     0x54);
+    }
+    qtest_ia64_460gx_inject_memory_error(
+        qts, test->card, test->mac, test->error,
+        0x0000000123456000ULL, 0x8877665544332211ULL, 0x5a, 5, 0x2d);
+
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, PCI_DEVFN(0, 1),
+                        HP_I2000_460GX_SAC_FERR) & test->sac_status,
+                    ==, test->sac_status);
+    if (test->sdc_status) {
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, HP_I2000_CHIPSET_BUS,
+                            PCI_DEVFN(INTEL_460GX_CHIPSET_SDC_DEVICE, 0),
+                            HP_I2000_460GX_SDC_FERR) & test->sdc_status,
+                        ==, test->sdc_status);
+    }
+    if (test->mac_status) {
+        g_assert_cmphex(hp_i2000_config_readb(
+                            qts, HP_I2000_CHIPSET_BUS,
+                            PCI_DEVFN(device, test->mac),
+                            HP_I2000_460GX_MAC_FERR) & test->mac_status,
+                        ==, test->mac_status);
+    }
+    g_assert_cmphex(qtest_readq(
+                        qts, bank + IA64_RAS_RECORD_REG_STATUS) &
+                        IA64_RAS_RECORD_STATUS_PRESENT,
+                    ==, IA64_RAS_RECORD_STATUS_PRESENT);
+    g_assert_cmpuint((qtest_readq(
+                          qts, bank + IA64_RAS_RECORD_DATA + 8) >> 16) & 0xff,
+                     ==, test->severity);
+    if (test->record_type == IA64_RAS_RECORD_TYPE_CPE) {
+        g_assert_cmphex(qtest_ia64_sapic(
+                            qts, "state", 0, 0x54, 0, 0, 0) & BIT(8),
+                        ==, BIT(8));
+    }
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_memory_error_order(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    const unsigned int sac = PCI_DEVFN(0, 1);
+    const unsigned int sdc =
+        PCI_DEVFN(INTEL_460GX_CHIPSET_SDC_DEVICE, 0);
+    uint32_t ferr;
+
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_CORRECTED,
+        0x123456000ULL, 0x8877665544332211ULL, 0x5a, 5, 0x2d);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_FERR),
+                    ==, BIT(24));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_NERR),
+                    ==, 0);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, sdc,
+                        HP_I2000_460GX_SDC_FERR),
+                    ==, BIT(2));
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, sdc,
+                        HP_I2000_460GX_SDC_NERR),
+                    ==, 0);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, HP_I2000_CHIPSET_BUS, sdc,
+                        HP_I2000_460GX_SDC_CARD_A_TXINFO),
+                    ==, (5 << 6) | 0x2d);
+
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_CORRECTED,
+        0x123457000ULL, 0, 0x11, 1, 2);
+    ferr = hp_i2000_config_readl(qts, HP_I2000_CHIPSET_BUS, sac,
+                                 HP_I2000_460GX_SAC_FERR);
+    g_assert_cmphex(ferr, ==, BIT(24) | BIT(23));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_NERR),
+                    ==, 0);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, sdc,
+                        HP_I2000_460GX_SDC_NERR),
+                    ==, BIT(2));
+
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_CORRECTED,
+        0x123458000ULL, 0, 0x22, 2, 3);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_NERR),
+                    ==, BIT(23));
+
+    hp_i2000_config_writel(qts, HP_I2000_CHIPSET_BUS, sac,
+                           HP_I2000_460GX_SAC_FERR, ferr);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_FERR),
+                    ==, 0);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_NERR),
+                    ==, BIT(23));
+    qtest_quit(qts);
+
+    qts = hp_i2000_start("2G");
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_CORRECTED,
+        0x123456000ULL, 0, 0, 0, 0);
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_COMMAND_PARITY,
+        0x123459000ULL, 0, 0, 0, 0);
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_FERR),
+                    ==, BIT(24) | BIT(30));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, sac,
+                        HP_I2000_460GX_SAC_NERR),
+                    ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_memory_card_first_error(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    const unsigned int mac = PCI_DEVFN(
+        INTEL_460GX_CHIPSET_MEMORY_CARD_A_DEVICE, 0);
+    const uint32_t first_command = UINT32_C(0x00234567);
+
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_COMMAND_PARITY,
+        first_command, 0, 0, 0, 0);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, mac,
+                        HP_I2000_460GX_MAC_FERR), ==,
+                    BIT(0));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, mac, 0x9c) &
+                    MAKE_64BIT_MASK(0, 22), ==,
+                    first_command & MAKE_64BIT_MASK(0, 22));
+
+    qtest_ia64_460gx_inject_memory_error(
+        qts, 0, 0, INTEL_460GX_MEMORY_ERROR_QUEUE_OVERFLOW,
+        0, 0, 0, 0, 0);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, mac,
+                        HP_I2000_460GX_MAC_FERR), ==,
+                    BIT(0));
+    hp_i2000_config_writeb(qts, HP_I2000_CHIPSET_BUS, mac,
+                           HP_I2000_460GX_MAC_FERR, UINT8_MAX);
+    g_assert_cmphex(hp_i2000_config_readb(
+                        qts, HP_I2000_CHIPSET_BUS, mac,
+                        HP_I2000_460GX_MAC_FERR), ==,
+                    BIT(0));
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, HP_I2000_CHIPSET_BUS, mac, 0x9c) &
+                    MAKE_64BIT_MASK(0, 22), ==,
+                    first_command & MAKE_64BIT_MASK(0, 22));
     qtest_quit(qts);
 }
 
@@ -3260,12 +3984,12 @@ static void test_hp_i2000_quadro2(void)
     g_assert_cmphex(qtest_readl(qts, HP_I2000_QUADRO2_FB_BASE +
                                     dest_offset + 4), ==, marker);
 
-    /* A single MMIO submission cannot monopolize the main loop. */
+    /* Individual primitives still have a size limit across FIFO yields. */
     qtest_writel(qts, HP_I2000_QUADRO2_MMIO_BASE +
                       HP_I2000_QUADRO2_USER + 0x2000 + 0x400, 0);
     qtest_writel(qts, HP_I2000_QUADRO2_MMIO_BASE +
                       HP_I2000_QUADRO2_USER + 0x2000 + 0x404,
-                 (2048U << 16) | 4096);
+                 (4096U << 16) | 4097);
     g_assert_cmphex(qtest_readl(qts, HP_I2000_QUADRO2_MMIO_BASE +
                                     HP_I2000_QUADRO2_PFIFO_INTR) & BIT(0),
                     ==, BIT(0));
@@ -3913,8 +4637,117 @@ static void test_hp_i2000_migration(void)
     g_assert_cmpint(g_unlink(path), ==, 0);
 }
 
+static void test_hp_i2000_ihpc_endpoint_migration(void)
+{
+    g_autofree char *path = g_strdup_printf(
+        "%s/hp-i2000-ihpc-migration.XXXXXX", g_get_tmp_dir());
+    g_autofree char *uri = NULL;
+    const unsigned int function0 = PCI_DEVFN(1, 0);
+    const unsigned int function1 = PCI_DEVFN(1, 1);
+    QTestState *qts;
+    int fd;
+
+    if (!qtest_has_device("pci-testdev")) {
+        g_test_skip("pci-testdev is unavailable");
+        return;
+    }
+
+    fd = g_mkstemp(path);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    uri = g_strdup_printf("file:%s", path);
+
+    qts = hp_i2000_start("2G");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function1",
+        "{'bus':'pci.1','addr':'1.1'}");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function0",
+        "{'bus':'pci.1','addr':'1.0','multifunction':true}");
+    qtest_writeb(qts, HP_I2000_IHPC0_MMIO_BAR + 1, BIT(0));
+    qtest_writew(qts, HP_I2000_IHPC0_MMIO_BAR + 2,
+                 HP_I2000_IHPC_MISC_RESERVED_ONE |
+                 HP_I2000_IHPC_MISC_SOGO);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function0, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function1, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    qtest_qmp_assert_success(
+        qts, "{'execute':'migrate','arguments':{'uri':%s}}", uri);
+    hp_i2000_wait_for_migration(qts);
+    qtest_quit(qts);
+
+    qts = hp_i2000_start_with_options("-incoming defer");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function1",
+        "{'bus':'pci.1','addr':'1.1'}");
+    qtest_qmp_device_add(
+        qts, "pci-testdev", "ihpc-function0",
+        "{'bus':'pci.1','addr':'1.0','multifunction':true}");
+    g_assert_cmphex(hp_i2000_config_readl(
+                        qts, 1, function0, PCI_VENDOR_ID), ==, UINT32_MAX);
+    qtest_qmp_assert_success(
+        qts, "{'execute':'migrate-incoming','arguments':"
+             "{'uri':%s,'exit-on-error':false}}", uri);
+    hp_i2000_wait_for_migration(qts);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function0, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    g_assert_cmphex(hp_i2000_config_readw(
+                        qts, 1, function1, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_REDHAT);
+    g_assert_cmphex(qtest_readb(qts, HP_I2000_IHPC0_MMIO_BAR + 1), ==,
+                    BIT(0));
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
+    static const HP460GXMemoryErrorCase memory_error_cases[] = {
+        {
+            .name = "corrected",
+            .card = 0,
+            .mac = 0,
+            .error = INTEL_460GX_MEMORY_ERROR_CORRECTED,
+            .sac_status = BIT(24),
+            .sdc_status = BIT(2),
+            .record_type = IA64_RAS_RECORD_TYPE_CPE,
+            .severity = IA64_RAS_SAL_STATUS_CORRECTED,
+        }, {
+            .name = "uncorrected",
+            .card = 1,
+            .mac = 1,
+            .error = INTEL_460GX_MEMORY_ERROR_UNCORRECTED,
+            .sac_status = BIT(23),
+            .sdc_status = BIT(1),
+            .record_type = IA64_RAS_RECORD_TYPE_MCA,
+            .severity = IA64_RAS_SAL_STATUS_RECOVERABLE,
+        }, {
+            .name = "command-parity",
+            .card = 0,
+            .mac = 1,
+            .error = INTEL_460GX_MEMORY_ERROR_COMMAND_PARITY,
+            .sac_status = BIT(30),
+            .mac_status = BIT(0),
+            .record_type = IA64_RAS_RECORD_TYPE_MCA,
+            .severity = IA64_RAS_SAL_STATUS_RECOVERABLE,
+        }, {
+            .name = "queue-overflow",
+            .card = 1,
+            .mac = 0,
+            .error = INTEL_460GX_MEMORY_ERROR_QUEUE_OVERFLOW,
+            .sac_status = BIT(31),
+            .mac_status = BIT(1),
+            .record_type = IA64_RAS_RECORD_TYPE_MCA,
+            .severity = IA64_RAS_SAL_STATUS_RECOVERABLE,
+        },
+    };
+    unsigned int i;
+
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/hp-i2000/machine-identity",
                    test_hp_i2000_machine_identity);
@@ -3928,8 +4761,27 @@ int main(int argc, char **argv)
     qtest_add_func("/hp-i2000/pci-dma-ram-map",
                    test_hp_i2000_pci_dma_ram_map);
     qtest_add_func("/hp-i2000/cs4281", test_hp_i2000_cs4281);
+    qtest_add_func("/hp-i2000/cs4281-dma", test_hp_i2000_cs4281_dma);
+    qtest_add_func("/hp-i2000/cs4281-handoff", test_hp_i2000_cs4281_handoff);
     qtest_add_func("/hp-i2000/pci-layout-reset",
                    test_hp_i2000_pci_layout_and_reset);
+    qtest_add_func("/hp-i2000/chipset-routing-registers",
+                   test_hp_i2000_chipset_routing_registers);
+    qtest_add_func("/hp-i2000/ihpc-fault-route",
+                   test_hp_i2000_ihpc_fault_route);
+    qtest_add_func("/hp-i2000/ihpc-endpoint-lifecycle",
+                   test_hp_i2000_ihpc_endpoint_lifecycle);
+    for (i = 0; i < G_N_ELEMENTS(memory_error_cases); i++) {
+        g_autofree char *path = g_strdup_printf(
+            "/hp-i2000/memory-error/%s", memory_error_cases[i].name);
+
+        qtest_add_data_func(path, &memory_error_cases[i],
+                            test_hp_i2000_memory_error);
+    }
+    qtest_add_func("/hp-i2000/memory-error/order",
+                   test_hp_i2000_memory_error_order);
+    qtest_add_func("/hp-i2000/memory-error/mac-first",
+                   test_hp_i2000_memory_card_first_error);
     qtest_add_func("/hp-i2000/acpi-pm", test_hp_i2000_acpi_pm);
     qtest_add_func("/hp-i2000/pib-inta", test_hp_i2000_pib_inta);
     qtest_add_func("/hp-i2000/isa-pid-fanout",
@@ -3947,5 +4799,7 @@ int main(int argc, char **argv)
     qtest_add_func("/hp-i2000/quadro2-migration",
                    test_hp_i2000_quadro2_migration);
     qtest_add_func("/hp-i2000/migration", test_hp_i2000_migration);
+    qtest_add_func("/hp-i2000/ihpc-endpoint-migration",
+                   test_hp_i2000_ihpc_endpoint_migration);
     return g_test_run();
 }

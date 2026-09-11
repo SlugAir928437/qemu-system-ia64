@@ -67,6 +67,8 @@
 #define CRTC_GEN_CNTL                           0x0050
 #define CRTC_EXT_CNTL                           0x0054
 #define DAC_CNTL                                0x0058
+#define DAC_EXT_CNTL                            0x0280
+#define DAC_MACRO_CNTL                          0x0d04
 #define CRTC_STATUS                             0x005c
 #define GPIO_VGA_DDC                            0x0060
 #define GPIO_DVI_DDC                            0x0064
@@ -115,6 +117,8 @@
 #define CRTC_OFFSET_LOCK                        BIT(31)
 #define CRTC_OFFSET_MASK                        0x07fffff8U
 #define CRTC_OFFSET_CNTL                        0x0228
+#define CRTC_TILE_LINE_MASK                     0xfU /* Radeon only */
+#define CRTC_TILE_EN                            BIT(15)
 #define CRTC_PITCH                              0x022c
 #define OVR_CLR                                 0x0230
 #define OVR_WID_LEFT_RIGHT                      0x0234
@@ -221,6 +225,19 @@
 #define CAP0_TRIG_CNTL                          0x0950
 #define CAP1_TRIG_CNTL                          0x09c0
 
+#define R100_SURFACE_CNTL                       0x0b00
+#define R100_SURF_TRANSLATION_DIS               BIT(8)
+/* These byte-swap fields have the same layout in SURFACE_CNTL and INFO. */
+#define R100_SURF_AP0_SWP_16BPP                  BIT(20)
+#define R100_SURF_AP0_SWP_32BPP                  BIT(21)
+#define R100_SURF_AP0_SWP_MASK                   (3U << 20)
+#define R100_SURF_AP1_SWP_MASK                   (3U << 22)
+#define R100_SURFACE0_LOWER_BOUND               0x0b04
+#define R100_SURFACE0_UPPER_BOUND               0x0b08
+#define R100_SURFACE0_INFO                      0x0b0c
+#define R100_SURF_TILE_COLOR_MACRO              0
+#define R100_SURF_TILE_COLOR_BOTH               1
+
 #define RBBM_STATUS                             0x0e40
 
 /*
@@ -268,6 +285,16 @@
 #define CLR_CMP_MASK                            0x15cc
 #define DP_SRC_FRGD_CLR                         0x15d8
 #define DP_SRC_BKGD_CLR                         0x15dc
+#define LEAD_BRES_ERR                           0x1600
+#define LEAD_BRES_INC                           0x1604
+#define LEAD_BRES_DEC                           0x1608
+#define TRAIL_BRES_ERR                          0x160c
+#define TRAIL_BRES_INC                          0x1610
+#define TRAIL_BRES_DEC                          0x1614
+#define TRAIL_X                                0x1618
+#define LEAD_BRES_LNTH                          0x161c
+#define TRAIL_X_SUB                            0x1620
+#define LEAD_BRES_LNTH_SUB                      0x1624
 #define DST_BRES_ERR                            0x1628
 #define DST_BRES_INC                            0x162c
 #define DST_BRES_DEC                            0x1630
@@ -573,7 +600,10 @@
 #define R100_CP_PACKET_COUNT_SHIFT              16
 #define R100_CP_PACKET_COUNT_MASK               (0x3fffU << 16)
 #define R100_PACKET3_NOP                        0x10
+#define R100_PACKET3_PLY_NEXTSCAN               0x1d
+#define R100_PACKET3_SET_SCISSORS               0x1e
 #define R100_PACKET3_3D_RNDR_GEN_INDX_PRIM      0x23
+#define R100_PACKET3_3D_RNDR_GEN_PRIM           0x25
 #define R100_PACKET3_WAIT_FOR_IDLE               0x26
 #define R100_PACKET3_3D_DRAW_VBUF                0x28
 #define R100_PACKET3_3D_DRAW_IMMD                0x29
@@ -582,8 +612,15 @@
 #define R100_PACKET3_3D_DRAW_VBUF_2              0x34
 #define R100_PACKET3_3D_DRAW_IMMD_2              0x35
 #define R100_PACKET3_3D_DRAW_INDX_2              0x36
+#define R100_PACKET3_CNTL_BITBLT                  0x92
 #define R100_PACKET3_CNTL_HOSTDATA_BLT            0x94
+#define R100_PACKET3_CNTL_POLYLINE                0x95
+#define R100_PACKET3_CNTL_POLYSCANLINES           0x98
+#define R100_PACKET3_LOAD_PALETTE                 0x2c
+#define R100_PACKET3_NEXT_CHAR                    0x19
+#define R100_PACKET3_CNTL_PAINT_MULTI             0x9a
 #define R100_PACKET3_CNTL_BITBLT_MULTI            0x9b
+#define R100_PACKET3_CNTL_TRANS_BITBLT            0x9c
 
 #define R100_RB_BUFSZ_MASK                      0x3fU
 #define R100_RB_BUF_SWAP_SHIFT                  16
@@ -631,6 +668,13 @@
 #define P2PLL_DIV_0                             0x2b
 #define POWER_MANAGEMENT                        0x2f
 
+/* Radeon R100/RV100 clock registers differ from the Rage128 aliases above. */
+#define R100_M_SPLL_REF_FB_DIV                   0x0a
+#define R100_SCLK_CNTL                           0x0d
+#define R100_MCLK_CNTL                           0x12
+#define R100_PLL_SRC_DIV2                        2
+#define R100_YCLKA_SRC_SHIFT                     4
+
 #define PPLL_RESET                              0x00000001
 #define PPLL_ATOMIC_UPDATE_EN                   0x00010000
 #define PPLL_VGA_ATOMIC_UPDATE_EN               0x00020000
@@ -660,6 +704,10 @@
 /* Config control values (CONFIG_CNTL) */
 #define APER_0_ENDIAN                           0x00000003
 #define APER_1_ENDIAN                           0x0000000c
+#define R100_APER_REG_ENDIAN_SHIFT              4
+#define R100_APER_REG_ENDIAN_BOTH               1
+#define R100_APER_REG_ENDIAN_1                  2
+#define R100_APER_REG_ENDIAN_0                  3
 #define CFG_VGA_IO_DIS                          0x00000400
 
 /* CRTC control values (CRTC_GEN_CNTL) */
@@ -695,6 +743,15 @@
 #define DAC_PALETTE_ACCESS_CNTL                 0x00000020
 #define DAC_PALETTE2_SNOOP_EN                   0x00000040
 #define DAC_PDWN                                0x00008000
+#define R100_DAC_CMP_EN                         BIT(3)
+#define R100_DAC_CMP_OUTPUT                     BIT(7)
+#define R100_DAC_FORCE_BLANK_OFF_EN             BIT(4)
+#define R100_DAC_FORCE_DATA_EN                  BIT(5)
+#define R100_DAC_FORCE_DATA_SEL_MASK            (3U << 6)
+#define R100_DAC_FORCE_DATA_MASK                (0x3ffU << 8)
+#define R100_DAC_PDWN_R                         BIT(16)
+#define R100_DAC_PDWN_G                         BIT(17)
+#define R100_DAC_PDWN_B                         BIT(18)
 
 /* CRTC_EXT_CNTL */
 #define CRT_CRTC_DISPLAY_DIS                    0x00000400
@@ -728,6 +785,7 @@
 #define SRC_MONO_FRGD                           0x00010000
 #define SRC_COLOR                               0x00030000
 #define DP_SRC_DATATYPE                         0x00030000
+#define R100_DP_SRC_DATATYPE2                   BIT(18)
 #define HOST_BIG_ENDIAN_EN                      0x20000000
 #define DP_BYTE_PIX_ORDER                       0x40000000
 
@@ -771,6 +829,8 @@
 #define GMC_DP_SRC_HOST                         0x03000000
 #define GMC_DP_SRC_HOST_BYTEALIGN               0x04000000
 #define GMC_3D_FCN_EN_CLR                       0x00000000
+#define GMC_3D_FCN_EN                           0x08000000
+#define R100_GMC_SRC_DATATYPE2                  BIT(27)
 #define GMC_AUX_CLIP_CLEAR                      0x20000000
 #define GMC_DST_CLR_CMP_FCN_CLEAR               0x10000000
 #define GMC_WRITE_MASK_SET                      0x40000000
@@ -820,6 +880,10 @@
 #define DST_POLYLINE_NONLAST                    0x00008000
 #define DST_RASTER_STALL                        0x00010000
 #define DST_POLY_EDGE                           0x00040000
+
+/* DP_CNTL_XDIR_YDIR_YMAJOR bit constants (DST_Y_MAJOR is shared) */
+#define DST_Y_DIR_TOP_TO_BOTTOM                 0x00008000
+#define DST_X_DIR_LEFT_TO_RIGHT                 0x80000000
 
 /* DP_MIX bit constants */
 #define DP_SRC_RECT                             0x00000200

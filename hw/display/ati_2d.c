@@ -15,11 +15,6 @@
 #include "ui/console.h"
 #include "ui/rect.h"
 
-/*
- * TODO: Implement tiled surfaces, stretch blits, and Bresenham
- * line/trapezoid commands.
- */
-
 static int ati_bpp_from_datatype(const ATIVGAState *s)
 {
     switch (s->regs.dp_datatype & 0xf) {
@@ -88,12 +83,12 @@ typedef struct {
     VGACommonState *vga;
     int bpp;
     uint32_t rop3;
+    uint32_t rop_coeff[8];
     bool host_data_active;
     bool left_to_right;
     bool top_to_bottom;
     bool need_swap;
     bool solid_brush;
-    bool register_brush;
     bool mono_lsb_first;
     bool write_mask_active;
     bool color_compare_active;
@@ -120,12 +115,14 @@ typedef struct {
     int dst_stride;
     uint8_t *dst_bits;
     uint32_t dst_offset;
+    unsigned int dst_tile;
     uint64_t dst_vram_offset;
 
     QemuRect src;
     int src_stride;
     const uint8_t *src_bits;
     uint32_t src_offset;
+    unsigned int src_tile;
     uint64_t src_vram_offset;
 } ATI2DCtx;
 
@@ -223,23 +220,38 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->vga = &s->vga;
     ctx->bpp = ati_bpp_from_datatype(s);
     ctx->rop3 = s->regs.dp_mix & GMC_ROP3_MASK;
+    /* Algebraic normal form, with variable bits D, S, P in that order. */
+    for (unsigned int i = 0; i < 8; i++) {
+        ctx->rop_coeff[i] = -((ctx->rop3 >> (16 + i)) & 1U);
+    }
+    for (unsigned int bit = 1; bit < 8; bit <<= 1) {
+        for (unsigned int i = 0; i < 8; i++) {
+            if (i & bit) {
+                ctx->rop_coeff[i] ^= ctx->rop_coeff[i ^ bit];
+            }
+        }
+    }
     ctx->host_data_active = s->host_data.active;
-    ctx->left_to_right = s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT;
+    /*
+     * X.Org xf86-video-ati 6.14.6 leaves XDIR unchanged in radeon_accelfuncs.c
+     * scanline uploads; model Radeon host-data rows as advancing in positive X.
+     */
+    ctx->left_to_right = (s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT) ||
+                        (ctx->host_data_active && !rage128);
     ctx->top_to_bottom = s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM;
     ctx->need_swap = (HOST_BIG_ENDIAN != s->vga.big_endian_fb);
     ctx->brush_type = (s->regs.dp_datatype & DP_BRUSH_DATATYPE) >> 8;
     ctx->solid_brush =
         ctx->brush_type == (BRUSH_SOLIDCOLOR >> 8) ||
         ctx->brush_type == (BRUSH_SOLIDCOLOR_LINE >> 8);
-    ctx->register_brush = !rage128;
     ctx->mono_lsb_first = s->regs.dp_datatype & DP_BYTE_PIX_ORDER;
     ctx->write_mask_active =
         (s->regs.dp_write_mask & ati_pixel_mask(ctx->bpp)) !=
         ati_pixel_mask(ctx->bpp);
     ctx->frgd_clr = s->regs.dp_brush_frgd_clr;
     ctx->bkgd_clr = s->regs.dp_brush_bkgd_clr;
-    ctx->brush_x = s->regs.brush_y_x & R100_BRUSH_X_MASK;
-    ctx->brush_y = (s->regs.brush_y_x & R100_BRUSH_Y_MASK) >> 8;
+    ctx->brush_x = s->regs.brush_y_x & (rage128 ? 31 : 7);
+    ctx->brush_y = (s->regs.brush_y_x >> 8) & (rage128 ? 31 : 7);
     ctx->brush_data = s->regs.brush_data;
     ctx->src_frgd_clr = s->regs.dp_src_frgd_clr;
     ctx->write_mask = s->regs.dp_write_mask;
@@ -274,6 +286,8 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
         break;
     }
     ctx->dst_offset = s->regs.dst_offset;
+    ctx->dst_tile = s->regs.dst_tile;
+    ctx->src_tile = s->regs.src_tile;
 
     if (rage128 && ctx->bpp == 24) {
         /* Rage128 packed-24 scissor X is expressed in byte coordinates. */
@@ -355,7 +369,8 @@ static bool ati_2d_rect_layout(const ATI2DCtx *ctx, int stride,
 
 static bool ati_2d_prepare_surface(ATIVGAState *s, const ATI2DCtx *ctx,
                                    uint32_t address, int stride,
-                                   const QemuRect *rect, const char *name,
+                                   unsigned int tile, const QemuRect *rect,
+                                   const char *name,
                                    bool is_write, uint8_t **bits,
                                    uint64_t *vram_offset)
 {
@@ -367,6 +382,33 @@ static bool ati_2d_prepare_surface(ATIVGAState *s, const ATI2DCtx *ctx,
     *vram_offset = 0;
     if (!ati_2d_rect_layout(ctx, stride, rect, name, &end)) {
         return false;
+    }
+    if (tile) {
+        if (ctx->rage128) {
+            qemu_log_mask(LOG_UNIMP,
+                          "ATI Rage128 tiled %s is not implemented\n", name);
+            return false;
+        }
+        if ((uint64_t)rect->width * rect->height > ATI_2D_MAX_PIXELS) {
+            return false;
+        }
+        for (unsigned int row = 0; row < rect->height; row++) {
+            for (unsigned int col = 0; col < rect->width * bypp; ) {
+                uint64_t offset, physical;
+                uint32_t xbyte = rect->x * bypp + col;
+                unsigned int count = MIN(rect->width * bypp - col,
+                                         16 - (xbyte & 15));
+
+                if (!ati_2d_tile_offset(s, address, stride, bypp, tile, xbyte,
+                                        rect->y + row, &offset) ||
+                    !ati_r100_gpu_vram_offset(s, address + offset, count,
+                                              &physical)) {
+                    return false;
+                }
+                col += count;
+            }
+        }
+        return true;
     }
     if (!ctx->rage128 && end > UINT64_C(1) + UINT32_MAX - address) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -488,83 +530,106 @@ static uint32_t ati_load_pixel(const ATI2DCtx *ctx, const uint8_t *src)
     }
 }
 
+static void ati_2d_fill_rows(const ATI2DCtx *ctx, const QemuRect *rect,
+                              uint32_t filler)
+{
+    unsigned int bypp = ctx->bpp / 8;
+    size_t row_bytes = (size_t)rect->width * bypp;
+    uint8_t pattern[192]; /* A multiple of every supported pixel size. */
+    uint8_t *first = ctx->dst_bits + rect->y * ctx->dst_stride + rect->x * bypp;
+    bool same_byte = true;
+
+    ati_store_pixel(ctx, pattern, filler);
+    for (unsigned int i = 1; i < bypp; i++) {
+        same_byte &= pattern[i] == pattern[0];
+    }
+    if (!same_byte) {
+        for (size_t filled = bypp; filled < sizeof(pattern);) {
+            size_t chunk = MIN(filled, sizeof(pattern) - filled);
+
+            memcpy(pattern + filled, pattern, chunk);
+            filled += chunk;
+        }
+    }
+    for (unsigned int y = 0; y < rect->height; y++) {
+        uint8_t *row = first + (size_t)y * ctx->dst_stride;
+
+        if (same_byte) {
+            memset(row, pattern[0], row_bytes);
+        } else {
+            /* Never use guest-writable VRAM as the constant fill pattern. */
+            for (size_t x = 0; x < row_bytes; x += sizeof(pattern)) {
+                memcpy(row + x, pattern, MIN(sizeof(pattern), row_bytes - x));
+            }
+        }
+    }
+}
+
 static bool ati_2d_brush_supported(const ATI2DCtx *ctx)
 {
-    switch (ctx->brush_type) {
-    case BRUSH_8X8_MONO_FRGD_BKGD >> 8:
-    case BRUSH_8X8_MONO_FRGD_LEAVE >> 8:
-    case BRUSH_8X8_COLOR >> 8:
-        return ctx->register_brush;
-    case BRUSH_SOLIDCOLOR >> 8:
-    case BRUSH_SOLIDCOLOR_LINE >> 8:
-        return true;
-    default:
-        return false;
-    }
+    return ctx->brush_type <= 14;
+}
+
+static unsigned int ati_2d_brush_width(const ATI2DCtx *ctx)
+{
+    unsigned int type = ctx->brush_type;
+
+    return type == 4 || type == 5 || type == 12 ? 1 :
+           type >= 6 && type <= 9 ? 32 : 8;
+}
+
+static unsigned int ati_2d_brush_height(const ATI2DCtx *ctx)
+{
+    unsigned int type = ctx->brush_type;
+
+    return type == 2 || type == 3 || type == 6 || type == 7 || type == 11 ? 1 :
+           type == 8 || type == 9 ? 32 : 8;
 }
 
 /*
  * The register brush is destination aligned.  BRUSH_Y_X names the origin
- * to which pattern element (0, 0) is aligned; the pattern repeats every
- * eight pixels in each direction.  Monochrome rows occupy consecutive
- * bytes in BRUSH_DATA0/1, with DP_BYTE_PIX_ORDER selecting bit polarity.
+ * to which pattern element (0, 0) is aligned; each axis wraps to the
+ * selected brush dimension.  Monochrome rows occupy consecutive bits in
+ * BRUSH_DATA, with DP_BYTE_PIX_ORDER selecting bit order.
  */
 static bool ati_2d_brush_pixel(const ATI2DCtx *ctx, unsigned int x,
                                unsigned int y, uint32_t *pattern)
 {
-    unsigned int pattern_x = (x - ctx->brush_x) & 7;
-    unsigned int pattern_y = (y - ctx->brush_y) & 7;
-    unsigned int pixel = pattern_y * 8 + pattern_x;
-    uint32_t pixel_mask = ati_pixel_mask(ctx->bpp);
+    unsigned int type = ctx->brush_type;
+    unsigned int width = ati_2d_brush_width(ctx);
+    unsigned int height = ati_2d_brush_height(ctx);
+    unsigned int px = (x - ctx->brush_x) & (width - 1);
+    unsigned int py = (y - ctx->brush_y) & (height - 1);
+    unsigned int pixel = py * width + px;
+    uint32_t mask = ati_pixel_mask(ctx->bpp);
 
-    switch (ctx->brush_type) {
-    case BRUSH_8X8_MONO_FRGD_BKGD >> 8:
-    case BRUSH_8X8_MONO_FRGD_LEAVE >> 8:
-    {
-        unsigned int bit = pattern_y * 8 +
-                           (ctx->mono_lsb_first ? pattern_x : 7 - pattern_x);
+    if (type >= 13) {
+        *pattern = ctx->frgd_clr & mask;
+    } else if (type < 10) {
+        unsigned int bit = py * width +
+                           (ctx->mono_lsb_first ? px : width - 1 - px);
         bool foreground = ctx->brush_data[bit / 32] & BIT(bit % 32);
 
-        if (!foreground &&
-            ctx->brush_type == (BRUSH_8X8_MONO_FRGD_LEAVE >> 8)) {
+        if (!foreground && (type & 1)) {
             return false;
         }
-        *pattern = (foreground ? ctx->frgd_clr : ctx->bkgd_clr) & pixel_mask;
-        return true;
+        *pattern = (foreground ? ctx->frgd_clr : ctx->bkgd_clr) & mask;
+    } else if (ctx->bpp == 8) {
+        *pattern = extract32(ctx->brush_data[pixel / 4], pixel % 4 * 8, 8);
+    } else if (ctx->bpp == 16) {
+        *pattern = extract32(ctx->brush_data[pixel / 2], pixel % 2 * 16, 16);
+    } else {
+        *pattern = ctx->brush_data[pixel] & mask;
     }
-    case BRUSH_8X8_COLOR >> 8:
-        switch (ctx->bpp) {
-        case 8:
-            *pattern = extract32(ctx->brush_data[pixel / 4],
-                                 pixel % 4 * 8, 8);
-            return true;
-        case 16:
-            *pattern = extract32(ctx->brush_data[pixel / 2],
-                                 pixel % 2 * 16, 16);
-            return true;
-        case 24:
-        case 32:
-            *pattern = ctx->brush_data[pixel] & pixel_mask;
-            return true;
-        default:
-            g_assert_not_reached();
-        }
-    case BRUSH_SOLIDCOLOR >> 8:
-    case BRUSH_SOLIDCOLOR_LINE >> 8:
-        *pattern = ctx->frgd_clr & pixel_mask;
-        return true;
-    default:
-        g_assert_not_reached();
-    }
+    return true;
 }
 
-static uint32_t ati_apply_rop3(uint8_t rop, uint32_t pattern,
+static uint32_t ati_apply_rop3(const ATI2DCtx *ctx, uint32_t pattern,
                                uint32_t source, uint32_t destination)
 {
-    uint32_t result = 0;
-    unsigned int i;
+    const uint32_t *c = ctx->rop_coeff;
 
-    switch (rop) {
+    switch (ctx->rop3 >> 16) {
     case 0x00:
         return 0;
     case 0xff:
@@ -605,18 +670,10 @@ static uint32_t ati_apply_rop3(uint8_t rop, uint32_t pattern,
         break;
     }
 
-    for (i = 0; i < 8; i++) {
-        uint32_t term;
-
-        if (!(rop & BIT(i))) {
-            continue;
-        }
-        term = i & 4 ? pattern : ~pattern;
-        term &= i & 2 ? source : ~source;
-        term &= i & 1 ? destination : ~destination;
-        result |= term;
-    }
-    return result;
+    return c[0] ^ (destination & c[1]) ^
+           (source & (c[2] ^ (destination & c[3]))) ^
+           (pattern & (c[4] ^ (destination & c[5]) ^
+                       (source & (c[6] ^ (destination & c[7])))));
 }
 
 static bool ati_color_compare_source(const ATI2DCtx *ctx, uint32_t *source)
@@ -741,34 +798,82 @@ static bool ati_2d_preserve_destination(const ATI2DCtx *ctx)
 
     return ati_2d_destination_needed(ctx) || ctx->color_compare_active ||
            (pattern_needed &&
-            ctx->brush_type == (BRUSH_8X8_MONO_FRGD_LEAVE >> 8));
+            ctx->brush_type < 10 && (ctx->brush_type & 1));
 }
 
-static bool ati_2d_generic_rop(const ATI2DCtx *ctx, const QemuRect *vis_src,
-                               const QemuRect *vis_dst)
+/* Shared by direct pixels and staged overlap; skipped pixels stay intact. */
+static inline bool ati_2d_composite_pixel(const ATI2DCtx *ctx,
+                                         uint32_t pattern, uint32_t source,
+                                         uint32_t destination, bool simple,
+                                         uint32_t *result)
 {
-    unsigned int bypp = ctx->bpp / 8;
-    uint8_t rop = ctx->rop3 >> 16;
-    bool source_needed = ((rop ^ (rop >> 2)) & 0x33) != 0;
-    bool pattern_needed = ((rop ^ (rop >> 4)) & 0x0f) != 0;
-    bool destination_needed = ati_2d_destination_needed(ctx);
     uint32_t pixel_mask = ati_pixel_mask(ctx->bpp);
-    unsigned int yi, xi;
 
-    if (pattern_needed && !ati_2d_brush_supported(ctx)) {
-        qemu_log_mask(LOG_UNIMP, "Unsupported ATI 2D brush type %u\n",
-                      ctx->brush_type);
+    if (!simple && ctx->color_compare_active &&
+        !ati_color_compare(ctx, &source, destination)) {
         return false;
     }
-    source_needed |= ati_color_compare_needs_source(ctx);
+    *result = ati_apply_rop3(ctx, pattern, source, destination) & pixel_mask;
+    if (!simple && ctx->write_mask_active) {
+        uint32_t mask = ctx->write_mask & pixel_mask;
 
-    for (yi = 0; yi < vis_dst->height; yi++) {
-        unsigned int y = ctx->top_to_bottom ? yi :
-                         vis_dst->height - 1 - yi;
+        *result = (*result & mask) | (destination & ~mask);
+    }
+    return true;
+}
 
-        for (xi = 0; xi < vis_dst->width; xi++) {
-            unsigned int x = ctx->left_to_right ? xi :
-                             vis_dst->width - 1 - xi;
+typedef struct ATI2DBrush {
+    uint32_t color[32][32];
+    uint32_t opaque[32];
+    unsigned int x_mask;
+    unsigned int y_mask;
+} ATI2DBrush;
+
+static inline uint32_t ati_2d_load_le(const uint8_t *ptr, unsigned int bypp)
+{
+    switch (bypp) {
+    case 1:
+        return *ptr;
+    case 2:
+        return lduw_le_p(ptr);
+    case 4:
+        return ldl_le_p(ptr);
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static inline void ati_2d_store_le(uint8_t *ptr, uint32_t value,
+                                   unsigned int bypp)
+{
+    switch (bypp) {
+    case 1:
+        *ptr = value;
+        break;
+    case 2:
+        stw_le_p(ptr, value);
+        break;
+    case 4:
+        stl_le_p(ptr, value);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+/* Four instantiations: ordinary LE 8/16/32bpp, plus the general path. */
+static inline QEMU_ALWAYS_INLINE void
+ati_2d_generic_rop_pixels(const ATI2DCtx *ctx, const QemuRect *vis_src,
+                         const QemuRect *vis_dst, const ATI2DBrush *brush,
+                         bool source_needed, bool pattern_needed,
+                         bool destination_needed, unsigned int bypp,
+                         bool simple)
+{
+    for (unsigned int yi = 0; yi < vis_dst->height; yi++) {
+        unsigned int y = ctx->top_to_bottom ? yi : vis_dst->height - 1 - yi;
+
+        for (unsigned int xi = 0; xi < vis_dst->width; xi++) {
+            unsigned int x = ctx->left_to_right ? xi : vis_dst->width - 1 - xi;
             uint8_t *dst = ctx->dst_bits +
                            (vis_dst->y + y) * ctx->dst_stride +
                            (vis_dst->x + x) * bypp;
@@ -777,35 +882,90 @@ static bool ati_2d_generic_rop(const ATI2DCtx *ctx, const QemuRect *vis_src,
             uint32_t source = 0;
             uint32_t result;
 
-            if (pattern_needed &&
-                !ati_2d_brush_pixel(ctx, vis_dst->x + x,
-                                    vis_dst->y + y, &pattern)) {
-                continue;
+            if (pattern_needed) {
+                if (ctx->solid_brush) {
+                    pattern = ctx->frgd_clr & ati_pixel_mask(ctx->bpp);
+                } else {
+                    unsigned int px = (vis_dst->x + x) & brush->x_mask;
+                    unsigned int py = (vis_dst->y + y) & brush->y_mask;
+
+                    if (!(brush->opaque[py] & BIT(px))) {
+                        continue;
+                    }
+                    pattern = brush->color[py][px];
+                }
             }
             if (destination_needed) {
-                destination = ati_load_pixel(ctx, dst);
+                destination = simple ? ati_2d_load_le(dst, bypp) :
+                                       ati_load_pixel(ctx, dst);
             }
             if (source_needed) {
                 const uint8_t *src = ctx->src_bits +
                     (vis_src->y + y) * ctx->src_stride +
                     (vis_src->x + x) * bypp;
 
-                source = ati_load_pixel(ctx, src);
+                source = simple ? ati_2d_load_le(src, bypp) :
+                                  ati_load_pixel(ctx, src);
             }
-            if (ctx->color_compare_active &&
-                !ati_color_compare(ctx, &source, destination)) {
+            if (!ati_2d_composite_pixel(ctx, pattern, source, destination,
+                                        simple, &result)) {
                 continue;
             }
-            result = ati_apply_rop3(rop, pattern, source,
-                                    destination) & pixel_mask;
-            if (ctx->write_mask_active) {
-                uint32_t mask = ctx->write_mask & pixel_mask;
-
-                result = (result & mask) | (destination & ~mask);
+            if (simple) {
+                ati_2d_store_le(dst, result, bypp);
+            } else {
+                ati_store_pixel(ctx, dst, make_filler(ctx->bpp, result));
             }
-            ati_store_pixel(ctx, dst, make_filler(ctx->bpp, result));
         }
     }
+}
+
+static bool ati_2d_generic_rop(const ATI2DCtx *ctx, const QemuRect *vis_src,
+                               const QemuRect *vis_dst)
+{
+    uint8_t rop = ctx->rop3 >> 16;
+    bool source_needed = ati_2d_source_needed(ctx);
+    bool pattern_needed = ((rop ^ (rop >> 4)) & 0x0f) != 0;
+    bool destination_needed = ati_2d_destination_needed(ctx);
+    ATI2DBrush brush;
+
+    if (pattern_needed && !ati_2d_brush_supported(ctx)) {
+        qemu_log_mask(LOG_UNIMP, "Unsupported ATI 2D brush type %u\n",
+                      ctx->brush_type);
+        return false;
+    }
+    /* No DMA callbacks occur in this loop: the register brush is stable. */
+    if (pattern_needed && !ctx->solid_brush) {
+        brush.x_mask = ati_2d_brush_width(ctx) - 1;
+        brush.y_mask = ati_2d_brush_height(ctx) - 1;
+        for (unsigned int y = 0; y <= brush.y_mask; y++) {
+            brush.opaque[y] = 0;
+            for (unsigned int x = 0; x <= brush.x_mask; x++) {
+                if (ati_2d_brush_pixel(ctx, x, y, &brush.color[y][x])) {
+                    brush.opaque[y] |= BIT(x);
+                }
+            }
+        }
+    }
+    if (!ctx->write_mask_active && !ctx->color_compare_active &&
+        !ctx->vga->big_endian_fb) {
+        switch (ctx->bpp) {
+        case 8:
+            ati_2d_generic_rop_pixels(ctx, vis_src, vis_dst, &brush,
+                source_needed, pattern_needed, destination_needed, 1, true);
+            return true;
+        case 16:
+            ati_2d_generic_rop_pixels(ctx, vis_src, vis_dst, &brush,
+                source_needed, pattern_needed, destination_needed, 2, true);
+            return true;
+        case 32:
+            ati_2d_generic_rop_pixels(ctx, vis_src, vis_dst, &brush,
+                source_needed, pattern_needed, destination_needed, 4, true);
+            return true;
+        }
+    }
+    ati_2d_generic_rop_pixels(ctx, vis_src, vis_dst, &brush,
+        source_needed, pattern_needed, destination_needed, ctx->bpp / 8, false);
     return true;
 }
 
@@ -925,12 +1085,7 @@ static bool ati_2d_do_blt_direct(const ATI2DCtx *ctx, QemuRect vis_src,
                          pixman_filler))
 #endif
         {
-            for (y = 0; y < vis_dst.height; y++) {
-                i = vis_dst.x * bypp + (vis_dst.y + y) * ctx->dst_stride;
-                for (x = 0; x < vis_dst.width; x++, i += bypp) {
-                    ati_store_pixel(ctx, &ctx->dst_bits[i], filler);
-                }
-            }
+            ati_2d_fill_rows(ctx, &vis_dst, filler);
         }
         break;
     }
@@ -940,6 +1095,44 @@ static bool ati_2d_do_blt_direct(const ATI2DCtx *ctx, QemuRect vis_src,
         return false;
     }
 
+    return true;
+}
+
+static bool ati_2d_tiled_access(ATIVGAState *s, const ATI2DCtx *ctx,
+                                 bool source, int x, int y, uint8_t *buffer,
+                                 uint64_t length, bool write)
+{
+    uint32_t address = source ? ctx->src_offset : ctx->dst_offset;
+    unsigned int stride = source ? ctx->src_stride : ctx->dst_stride;
+    unsigned int tile = source ? ctx->src_tile : ctx->dst_tile;
+    uint32_t xbyte = x * (ctx->bpp / 8);
+
+    for (uint64_t done = 0; done < length; ) {
+        uint64_t offset, physical;
+        unsigned int count = MIN(length - done, 16 - ((xbyte + done) & 15));
+
+        if (!ati_2d_tile_offset(s, address, stride, ctx->bpp / 8, tile,
+                                xbyte + done, y, &offset)) {
+            return false;
+        }
+        if (ctx->rage128) {
+            physical = address + offset;
+            if (physical > s->vga.vram_size ||
+                count > s->vga.vram_size - physical) {
+                return false;
+            }
+        } else if (!ati_r100_gpu_vram_offset(s, address + offset, count,
+                                              &physical)) {
+            return false;
+        }
+        if (write) {
+            memcpy(s->vga.vram_ptr + physical, buffer + done, count);
+            memory_region_set_dirty(&s->vga.vram, physical, count);
+        } else {
+            memcpy(buffer + done, s->vga.vram_ptr + physical, count);
+        }
+        done += count;
+    }
     return true;
 }
 
@@ -953,6 +1146,10 @@ static bool ati_2d_surface_read(ATIVGAState *s, const ATI2DCtx *ctx,
     uint64_t offset = (uint64_t)y * stride +
                       (uint64_t)x * (ctx->bpp / 8);
 
+    if ((source ? ctx->src_tile : ctx->dst_tile) &&
+        !(source && ctx->host_data_active)) {
+        return ati_2d_tiled_access(s, ctx, source, x, y, buf, length, false);
+    }
     if (bits) {
         memcpy(buf, bits + offset, length);
         return true;
@@ -967,6 +1164,10 @@ static bool ati_2d_surface_write(ATIVGAState *s, const ATI2DCtx *ctx,
     uint64_t offset = (uint64_t)y * ctx->dst_stride +
                       (uint64_t)x * (ctx->bpp / 8);
 
+    if (ctx->dst_tile) {
+        return ati_2d_tiled_access(s, ctx, false, x, y, (uint8_t *)buf,
+                                   length, true);
+    }
     if (ctx->dst_bits) {
         memcpy(ctx->dst_bits + offset, buf, length);
         memory_region_set_dirty(&ctx->vga->vram,
@@ -1003,21 +1204,23 @@ static bool ati_2d_do_blt_staged_overlap(ATIVGAState *s,
                                          bool preserve_destination)
 {
     unsigned int bypp = ctx->bpp / 8;
-    unsigned int xi;
+    uint8_t rop = ctx->rop3 >> 16;
+    bool generic = ati_2d_uses_generic_rop(ctx);
+    bool pattern_needed = ((rop ^ (rop >> 4)) & 0x0f) != 0;
+    bool destination_needed = ati_2d_destination_needed(ctx);
 
-    for (xi = 0; xi < vis_dst->width; xi++) {
-        ATI2DCtx pixel = *ctx;
-        uint8_t src_pixel[4] = { 0 };
-        uint8_t dst_pixel[4] = { 0 };
-        unsigned int x = ctx->left_to_right ? xi :
-                         vis_dst->width - 1 - xi;
+    for (unsigned int xi = 0; xi < vis_dst->width; xi++) {
+        uint8_t src_pixel[4];
+        uint8_t dst_pixel[4];
+        unsigned int x = ctx->left_to_right ? xi : vis_dst->width - 1 - xi;
         int src_x = vis_src->x + x;
         int src_y = vis_src->y + y;
         int dst_x = vis_dst->x + x;
         int dst_y = vis_dst->y + y;
-        QemuRect local_src;
-        QemuRect local_dst;
+        uint32_t pattern = 0;
+        uint32_t result;
 
+        /* Preserve reads, including their order, before brush evaluation. */
         if (!ati_2d_surface_read(s, ctx, true, src_x, src_y,
                                  src_pixel, bypp) ||
             (preserve_destination &&
@@ -1025,23 +1228,26 @@ static bool ati_2d_do_blt_staged_overlap(ATIVGAState *s,
                                   dst_pixel, bypp))) {
             return false;
         }
-        qemu_rect_init(&local_src, 0, 0, 1, 1);
-        qemu_rect_init(&local_dst, 0, 0, 1, 1);
-        pixel.src = local_src;
-        pixel.dst = local_dst;
-        pixel.scissor = local_dst;
-        pixel.source_clip_active = false;
-        pixel.src_bits = src_pixel;
-        pixel.dst_bits = dst_pixel;
-        pixel.src_stride = bypp;
-        pixel.dst_stride = bypp;
-        pixel.src_vram_offset = 0;
-        pixel.dst_vram_offset = bypp;
-        pixel.host_data_active = true;
-        pixel.brush_x = (ctx->brush_x - dst_x) & 7;
-        pixel.brush_y = (ctx->brush_y - dst_y) & 7;
-        if (!ati_2d_do_blt_direct(&pixel, local_src, local_dst, 0) ||
-            !ati_2d_surface_write(s, ctx, dst_x, dst_y, dst_pixel, bypp)) {
+        if (!generic) {
+            /* Only SRCCOPY needs a source in the non-generic path. */
+            memcpy(dst_pixel, src_pixel, bypp);
+        } else {
+            if (pattern_needed && !ati_2d_brush_supported(ctx)) {
+                qemu_log_mask(LOG_UNIMP, "Unsupported ATI 2D brush type %u\n",
+                              ctx->brush_type);
+                return false;
+            }
+            if ((!pattern_needed ||
+                 ati_2d_brush_pixel(ctx, dst_x, dst_y, &pattern)) &&
+                ati_2d_composite_pixel(ctx, pattern,
+                    ati_load_pixel(ctx, src_pixel),
+                    destination_needed ? ati_load_pixel(ctx, dst_pixel) : 0,
+                    false, &result)) {
+                ati_store_pixel(ctx, dst_pixel, make_filler(ctx->bpp, result));
+            }
+        }
+        /* Skipped pixels write back their preserved values. */
+        if (!ati_2d_surface_write(s, ctx, dst_x, dst_y, dst_pixel, bypp)) {
             return false;
         }
     }
@@ -1053,10 +1259,42 @@ static bool ati_2d_do_blt_staged(ATIVGAState *s, const ATI2DCtx *ctx,
                                  bool source_needed)
 {
     unsigned int row_bytes = vis_dst.width * (ctx->bpp / 8);
-    g_autofree uint8_t *src_row = source_needed ? g_malloc(row_bytes) : NULL;
-    g_autofree uint8_t *dst_row = g_malloc(row_bytes);
+    size_t buffer_size = (size_t)row_bytes * (source_needed ? 2 : 1);
+    bool reuse = !s->blt_row_buffer_busy && buffer_size <= 128 * KiB;
+    g_autofree uint8_t *private_buffer = NULL;
+    uint8_t *buffer;
+    uint8_t *src_row;
+    uint8_t *dst_row;
+    bool success = false;
     bool preserve_destination = ati_2d_preserve_destination(ctx);
     unsigned int yi;
+
+    g_autofree uint8_t *tile_source = NULL;
+
+    if (source_needed && !ctx->host_data_active &&
+        (ctx->src_tile || ctx->dst_tile)) {
+        tile_source = g_malloc((size_t)row_bytes * vis_src.height);
+        for (unsigned int row = 0; row < vis_src.height; row++) {
+            if (!ati_2d_surface_read(s, ctx, true, vis_src.x, vis_src.y + row,
+                                     tile_source + (size_t)row * row_bytes,
+                                     row_bytes)) {
+                return false;
+            }
+        }
+    }
+    if (reuse) {
+        s->blt_row_buffer_busy = true;
+        if (s->blt_row_buffer_size < buffer_size) {
+            s->blt_row_buffer = g_realloc(s->blt_row_buffer, buffer_size);
+            s->blt_row_buffer_size = buffer_size;
+        }
+        buffer = s->blt_row_buffer;
+    } else {
+        private_buffer = g_malloc(buffer_size);
+        buffer = private_buffer;
+    }
+    dst_row = buffer;
+    src_row = source_needed ? buffer + row_bytes : NULL;
 
     for (yi = 0; yi < vis_dst.height; yi++) {
         ATI2DCtx row = *ctx;
@@ -1067,32 +1305,47 @@ static bool ati_2d_do_blt_staged(ATIVGAState *s, const ATI2DCtx *ctx,
         QemuRect local_src;
         QemuRect local_dst;
         bool overlap = false;
+        const uint8_t *source = src_row;
+        uint8_t *destination = dst_row;
+        unsigned int bypp = ctx->bpp / 8;
 
-        if (source_needed && !ctx->host_data_active &&
+        if (source_needed && !ctx->host_data_active && !tile_source &&
             (!ati_2d_staged_row_overlap(s, ctx, &vis_src, &vis_dst, y,
                                         row_bytes, &overlap) ||
              (overlap &&
               !ati_2d_do_blt_staged_overlap(s, ctx, &vis_src, &vis_dst, y,
                                              preserve_destination)))) {
-            return false;
+            goto out;
         }
         if (overlap) {
             continue;
         }
 
-        if (source_needed &&
-            !ati_2d_surface_read(s, ctx, true, vis_src.x, src_y,
-                                 src_row, row_bytes)) {
-            return false;
+        /*
+         * A staged destination is committed only after evaluation.  Reading
+         * its old pixels through DMA could alter the source via MMIO, so
+         * retain the source snapshot whenever those reads are required.
+         */
+        if (tile_source) {
+            source = tile_source + (size_t)y * row_bytes;
+        } else if (source_needed && ctx->src_bits && !preserve_destination) {
+            source = ctx->src_bits + (size_t)src_y * ctx->src_stride +
+                     (size_t)vis_src.x * bypp;
+        } else if (source_needed &&
+                   !ati_2d_surface_read(s, ctx, true, vis_src.x, src_y,
+                                        src_row, row_bytes)) {
+            goto out;
         }
-        if (preserve_destination) {
-            if (!ati_2d_surface_read(s, ctx, false, vis_dst.x, dst_y,
-                                     dst_row, row_bytes)) {
-                return false;
-            }
-        } else {
-            memset(dst_row, 0, row_bytes);
+        if (ctx->dst_bits) {
+            /* All faultable source reads have finished before row writes. */
+            destination = ctx->dst_bits + (size_t)dst_y * ctx->dst_stride +
+                          (size_t)vis_dst.x * bypp;
+        } else if (preserve_destination &&
+                   !ati_2d_surface_read(s, ctx, false, vis_dst.x, dst_y,
+                                        dst_row, row_bytes)) {
+            goto out;
         }
+        /* Otherwise every byte is overwritten, or rejected before writing. */
 
         qemu_rect_init(&local_src, 0, 0, vis_src.width, 1);
         qemu_rect_init(&local_dst, 0, 0, vis_dst.width, 1);
@@ -1100,22 +1353,34 @@ static bool ati_2d_do_blt_staged(ATIVGAState *s, const ATI2DCtx *ctx,
         row.dst = local_dst;
         row.scissor = local_dst;
         row.source_clip_active = false;
-        row.src_bits = src_row;
-        row.dst_bits = dst_row;
+        row.src_bits = source;
+        row.dst_bits = destination;
         row.src_stride = row_bytes;
         row.dst_stride = row_bytes;
         row.src_vram_offset = 0;
         row.dst_vram_offset = row_bytes;
         row.host_data_active = true;
-        row.brush_x = (ctx->brush_x - vis_dst.x) & 7;
-        row.brush_y = (ctx->brush_y - dst_y) & 7;
-        if (!ati_2d_do_blt_direct(&row, local_src, local_dst, 0) ||
-            !ati_2d_surface_write(s, ctx, vis_dst.x, dst_y,
-                                  dst_row, row_bytes)) {
-            return false;
+        /* Keep the full phase; ati_2d_brush_pixel() wraps to the brush size. */
+        row.brush_x = ctx->brush_x - vis_dst.x;
+        row.brush_y = ctx->brush_y - dst_y;
+        if (!ati_2d_do_blt_direct(&row, local_src, local_dst, 0)) {
+            goto out;
+        }
+        if (ctx->dst_bits) {
+            memory_region_set_dirty(&ctx->vga->vram,
+                ctx->dst_vram_offset + (size_t)dst_y * ctx->dst_stride +
+                (size_t)vis_dst.x * bypp, row_bytes);
+        } else if (!ati_2d_surface_write(s, ctx, vis_dst.x, dst_y,
+                                         dst_row, row_bytes)) {
+            goto out;
         }
     }
-    return true;
+    success = true;
+out:
+    if (reuse) {
+        s->blt_row_buffer_busy = false;
+    }
+    return success;
 }
 
 static bool ati_2d_do_blt(ATIVGAState *s, const ATI2DCtx *ctx,
@@ -1139,15 +1404,15 @@ static bool ati_2d_do_blt(ATIVGAState *s, const ATI2DCtx *ctx,
         return false;
     }
     if (!ati_2d_prepare_surface(s, ctx, ctx->dst_offset, ctx->dst_stride,
-                                &vis_dst, "destination", true,
+                                ctx->dst_tile, &vis_dst, "destination", true,
                                 &direct.dst_bits,
                                 &direct.dst_vram_offset)) {
         return false;
     }
     if (ati_2d_preserve_destination(ctx) && !direct.dst_bits &&
         !ati_2d_prepare_surface(s, ctx, ctx->dst_offset, ctx->dst_stride,
-                                &vis_dst, "destination", false, &read_bits,
-                                &read_vram_offset)) {
+                                ctx->dst_tile, &vis_dst, "destination", false,
+                                &read_bits, &read_vram_offset)) {
         return false;
     }
     source_needed = ati_2d_source_needed(ctx);
@@ -1159,8 +1424,8 @@ static bool ati_2d_do_blt(ATIVGAState *s, const ATI2DCtx *ctx,
                 return false;
             }
         } else if (!ati_2d_prepare_surface(s, ctx, ctx->src_offset,
-                                           ctx->src_stride, &vis_src,
-                                           "source", false, &src_bits,
+                                           ctx->src_stride, ctx->src_tile,
+                                           &vis_src, "source", false, &src_bits,
                                            &direct.src_vram_offset)) {
             return false;
         } else {
@@ -1216,6 +1481,7 @@ void ati_2d_blt(ATIVGAState *s)
     }
     setup_2d_blt_ctx(s, &ctx);
     ati_2d_do_blt(s, &ctx, s->use_pixman, true);
+    ati_2d_complete(s);
 }
 
 static bool ati_host_data_blit_pixels(ATIVGAState *s, const ATI2DCtx *ctx,
@@ -1439,13 +1705,13 @@ static bool ati_host_data_mono_blit(ATIVGAState *s, const ATI2DCtx *ctx,
             continue;
         }
         if (!ati_2d_prepare_surface(s, ctx, ctx->dst_offset,
-                                    ctx->dst_stride, &clipped,
+                                    ctx->dst_stride, ctx->dst_tile, &clipped,
                                     "destination", true, &bits,
                                     &vram_offset) ||
             ((destination_needed ||
               (last - first >= 4 && preserve_destination)) &&
              !ati_2d_prepare_surface(s, ctx, ctx->dst_offset,
-                                     ctx->dst_stride, &clipped,
+                                     ctx->dst_stride, ctx->dst_tile, &clipped,
                                      "destination", false, &bits,
                                      &vram_offset))) {
             return false;
@@ -1511,7 +1777,7 @@ static bool ati_host_data_mono_blit(ATIVGAState *s, const ATI2DCtx *ctx,
                     !ati_color_compare(ctx, &source, destination)) {
                     continue;
                 }
-                result = ati_apply_rop3(rop, pattern, source,
+                result = ati_apply_rop3(ctx, pattern, source,
                                         destination) & pixel_mask;
                 if (ctx->write_mask_active) {
                     uint32_t mask = ctx->write_mask & pixel_mask;
@@ -1663,6 +1929,39 @@ static bool ati_host_data_consume(ATIVGAState *s, unsigned int bank,
     return s->host_data.active;
 }
 
+static bool ati_host_data_input_complete(const ATIVGAState *s)
+{
+    const ATIHostDataState *host = &s->host_data;
+    uint32_t width = s->regs.dst_width;
+    uint32_t height = s->regs.dst_height;
+    uint32_t datatype = s->regs.dp_datatype & DP_SRC_DATATYPE;
+    uint64_t buffered = host->next * 32;
+    uint64_t remaining;
+
+    if (!width || host->row >= height || host->col >= width) {
+        return true;
+    }
+    if (datatype == SRC_COLOR) {
+        unsigned int bpp = ati_bpp_from_datatype(s);
+
+        remaining = ((uint64_t)(height - host->row) * width - host->col) *
+                    bpp;
+        buffered += host->pending_count * 8;
+    } else if (datatype == SRC_MONO_FRGD_BKGD || datatype == SRC_MONO_FRGD) {
+        unsigned int row_bits = width;
+
+        if ((s->regs.dp_mix & DP_SRC_SOURCE) == DP_SRC_HOST_BYTEALIGN) {
+            row_bits = QEMU_ALIGN_UP(width, 8);
+        }
+        remaining = (uint64_t)(height - host->row - 1) * row_bits +
+                    width - host->col;
+    } else {
+        /* Let the consumer reject the unsupported source format. */
+        return true;
+    }
+    return buffered >= remaining;
+}
+
 bool ati_host_data_write(ATIVGAState *s, uint32_t data, bool last)
 {
     if (!s->host_data.active) {
@@ -1685,12 +1984,20 @@ bool ati_host_data_write(ATIVGAState *s, uint32_t data, bool last)
         memset(s->host_data.pending, 0, sizeof(s->host_data.pending));
     } else {
         s->host_data.next++;
-        if (s->host_data.next == ATI_HOST_DATA_BANK_DWORDS) {
-            ati_host_data_consume(s, 0, ATI_HOST_DATA_BANK_DWORDS);
+        /*
+         * Consume a complete rectangle even without HOST_DATA_LAST, before
+         * a subsequent blit can change the drawing registers.
+         */
+        if (s->host_data.next == ATI_HOST_DATA_BANK_DWORDS ||
+            ati_host_data_input_complete(s)) {
+            ati_host_data_consume(s, 0, s->host_data.next);
             s->host_data.next = 0;
         }
     }
 
+    if (!s->host_data.active) {
+        ati_2d_complete(s);
+    }
     return s->host_data.active;
 }
 
@@ -1713,4 +2020,351 @@ void ati_host_data_finish(ATIVGAState *s)
     s->host_data.next = 0;
     s->host_data.pending_count = 0;
     memset(s->host_data.pending, 0, sizeof(s->host_data.pending));
+    ati_2d_complete(s);
+}
+
+static bool ati_2d_line_pixel(const ATI2DCtx *ctx, int x, int y,
+                             unsigned int phase)
+{
+    ATI2DCtx pixel = *ctx;
+
+    if (!ati_3d_consume_2d_work(ctx->s, 1)) {
+        return false;
+    }
+    qemu_rect_init(&pixel.dst, x, y, 1, 1);
+    pixel.src = pixel.dst;
+    /* Line brushes advance along the trajectory, even under clipping. */
+    if (ctx->brush_type >= 2 && ctx->brush_type <= 7) {
+        pixel.brush_x = (x - phase) & 31;
+        pixel.brush_y = (y - phase) & 31;
+    }
+    ati_2d_do_blt(ctx->s, &pixel, 0, false);
+    return !ctx->s->r100_3d.command_budget_exhausted;
+}
+
+/* Software Bresenham arithmetic leaves the setup registers unchanged. */
+static void ati_2d_bresenham(ATIVGAState *s, unsigned int length)
+{
+    ATI2DCtx ctx;
+    int x = ati_coord_14(s->regs.dst_x);
+    int y = ati_coord_14(s->regs.dst_y);
+    int64_t error = (int32_t)s->regs.bres[0];
+    int inc = (int32_t)s->regs.bres[1];
+    int dec = (int32_t)s->regs.bres[2];
+    int xdir = s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ? 1 : -1;
+    int ydir = s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ? 1 : -1;
+    bool major_y = s->regs.dp_cntl & DST_Y_MAJOR;
+
+    ati_host_data_finish(s);
+    setup_2d_blt_ctx(s, &ctx);
+    ctx.source_clip_active = false;
+    for (unsigned int i = 0; i < length; i++) {
+        if (!ati_2d_line_pixel(&ctx, x, y,
+                              i + (s->regs.brush_y_x & 31))) {
+            break;
+        }
+        error += inc;
+        if (error >= 0) {
+            error += dec;
+            if (major_y) {
+                x += xdir;
+            } else {
+                y += ydir;
+            }
+        }
+        if (major_y) {
+            y += ydir;
+        } else {
+            x += xdir;
+        }
+    }
+    ati_2d_complete(s);
+}
+
+void ati_2d_polyline(ATIVGAState *s, const uint32_t *points,
+                     unsigned int count)
+{
+    ATI2DCtx ctx;
+    unsigned int phase = s->regs.brush_y_x & 31;
+
+    ati_host_data_finish(s);
+    setup_2d_blt_ctx(s, &ctx);
+    ctx.source_clip_active = false;
+    for (unsigned int vertex = 1; vertex < count; vertex++) {
+        int x = ati_coord_14(points[vertex - 1]);
+        int y = ati_coord_14(points[vertex - 1] >> 16);
+        int end_x = ati_coord_14(points[vertex]);
+        int end_y = ati_coord_14(points[vertex] >> 16);
+        int dx = abs(end_x - x);
+        int dy = abs(end_y - y);
+        int xdir = end_x >= x ? 1 : -1;
+        int ydir = end_y >= y ? 1 : -1;
+        bool major_y = dy > dx;
+        int length = MAX(dx, dy);
+        int error = -length;
+        int inc = 2 * MIN(dx, dy);
+
+        /* Exclude the endpoint so shared vertices are drawn once. */
+        for (int i = 0; i < length; i++, phase++) {
+            if (!ati_2d_line_pixel(&ctx, x, y, phase)) {
+                ati_2d_complete(s);
+                return;
+            }
+            error += inc;
+            if (error >= 0) {
+                error -= 2 * length;
+                if (major_y) {
+                    x += xdir;
+                } else {
+                    y += ydir;
+                }
+            }
+            if (major_y) {
+                y += ydir;
+            } else {
+                x += xdir;
+            }
+        }
+    }
+    ati_2d_complete(s);
+}
+
+/* Integer edge slopes and half-open spans approximate trapezoid coverage. */
+static void ati_2d_trapezoid(ATIVGAState *s, unsigned int height)
+{
+    ATI2DCtx ctx;
+    int x = ati_coord_14(s->regs.dst_x);
+    int y = ati_coord_14(s->regs.dst_y);
+    int trail = ati_coord_14(s->regs.trail[3]);
+    int64_t dx = (int32_t)s->regs.bres[1];
+    int64_t dy = -(int64_t)(int32_t)s->regs.bres[2];
+    int64_t trail_dx = (int32_t)s->regs.trail[1];
+    int64_t trail_dy = -(int64_t)(int32_t)s->regs.trail[2];
+    int xdir = s->regs.dp_cntl & DST_X_LEFT_TO_RIGHT ? 1 : -1;
+    int ydir = s->regs.dp_cntl & DST_Y_TOP_TO_BOTTOM ? 1 : -1;
+    int trail_dir = s->regs.dp_cntl & DST_TRAIL_X_LEFT_TO_RIGHT ? 1 : -1;
+    uint64_t pixels = 0;
+
+    ati_host_data_finish(s);
+    if (dx < 0 || trail_dx < 0 || dy <= 0 || trail_dy <= 0) {
+        qemu_log_mask(LOG_UNIMP, "ATI unsupported trapezoid edge parameters\n");
+        ati_2d_complete(s);
+        return;
+    }
+    setup_2d_blt_ctx(s, &ctx);
+    ctx.source_clip_active = false;
+    for (unsigned int i = 0; i < height; i++) {
+        int64_t lead_x = x + xdir * (i * dx / dy);
+        int64_t trail_x = trail + trail_dir * (i * trail_dx / trail_dy);
+        int64_t left = MAX(MIN(lead_x, trail_x), 0);
+        int64_t right = MIN(MAX(lead_x, trail_x), INT16_MAX);
+        ATI2DCtx row = ctx;
+
+        if (right <= left) {
+            continue;
+        }
+        pixels += right - left;
+        if (pixels > ATI_2D_MAX_PIXELS ||
+            !ati_3d_consume_2d_work(s, right - left)) {
+            break;
+        }
+        qemu_rect_init(&row.dst, left, y + ydir * (int)i, right - left, 1);
+        row.src = row.dst;
+        ati_2d_do_blt(s, &row, 0, false);
+    }
+    ati_2d_complete(s);
+}
+
+/* Generic bilinear filtering, rounded once per channel, with clamped edges. */
+static uint32_t ati_2d_scale_blend(uint32_t a, uint32_t b,
+                                  uint32_t c, uint32_t d,
+                                  uint32_t fx, uint32_t fy,
+                                  unsigned int datatype)
+{
+    uint32_t result = 0;
+    unsigned int shift = 0;
+
+    while (shift < (datatype == 3 ? 15 : datatype == 4 ? 16 : 32)) {
+        unsigned int bits = datatype == 3 ? 5 :
+                            datatype == 4 ? (shift == 5 ? 6 : 5) : 8;
+        uint32_t mask = (1U << bits) - 1;
+        uint64_t top = ((a >> shift) & mask) * (65536 - fx) +
+                       ((b >> shift) & mask) * fx;
+        uint64_t bottom = ((c >> shift) & mask) * (65536 - fx) +
+                          ((d >> shift) & mask) * fx;
+        uint32_t v = (top * (65536 - fy) + bottom * fy + BIT_ULL(31)) >> 32;
+
+        result |= v << shift;
+        shift += bits;
+    }
+    return result;
+}
+
+static void ati_2d_stretch(ATIVGAState *s)
+{
+    ATI2DCtx ctx, source;
+    uint32_t *scale = s->regs.scale;
+    unsigned int sw = scale[0] & 0x3fff, sh = (scale[0] >> 16) & 0x3fff;
+    unsigned int dw = scale[8] & 0x3fff, dh = (scale[8] >> 16) & 0x3fff;
+    unsigned int datatype = s->regs.dp_datatype & 15;
+    unsigned int cpp;
+    uint8_t *bits;
+    uint64_t physical;
+    QemuRect rect;
+    g_autofree uint8_t *input = NULL;
+    g_autofree uint8_t *output = NULL;
+
+    ati_host_data_finish(s);
+    if ((s->regs.scale_3d_cntl & 0xc0) != 0x40 ||
+        !sw || !sh || !dw || !dh ||
+        (uint64_t)sw * sh > ATI_2D_MAX_PIXELS ||
+        (uint64_t)dw * dh > ATI_2D_MAX_PIXELS ||
+        ((s->regs.scale_3d_datatype & 15) &&
+         (s->regs.scale_3d_datatype & 15) != datatype)) {
+        return;
+    }
+    setup_2d_blt_ctx(s, &ctx);
+    cpp = ctx.bpp / 8;
+    if (!cpp || !ati_3d_consume_2d_work(s, (uint64_t)dw * dh)) {
+        return;
+    }
+    source = ctx;
+    source.src_offset = scale[1];
+    source.src_stride = (scale[2] & 0x7ff) * 8 * (cpp == 3 ? 1 : cpp);
+    source.src_tile = (scale[2] >> 16) & 1;
+    source.host_data_active = false;
+    qemu_rect_init(&rect, 0, 0, sw, sh);
+    if (!ati_2d_prepare_surface(s, &source, source.src_offset,
+                                source.src_stride, source.src_tile, &rect,
+                                "scaler source", false, &bits, &physical)) {
+        ati_2d_complete(s);
+        return;
+    }
+    source.src_bits = bits;
+    input = g_malloc((size_t)sw * sh * cpp);
+    output = g_malloc((size_t)dw * dh * cpp);
+    for (unsigned int y = 0; y < sh; y++) {
+        if (!ati_2d_surface_read(s, &source, true, 0, y,
+                                 input + (size_t)y * sw * cpp, sw * cpp)) {
+            return;
+        }
+    }
+    for (unsigned int y = 0; y < dh; y++) {
+        uint64_t sy = (uint64_t)scale[6] + (uint64_t)y * scale[4];
+        unsigned int y0 = MIN(sy >> 16, sh - 1);
+        unsigned int y1 = MIN(y0 + 1, sh - 1);
+
+        for (unsigned int x = 0; x < dw; x++) {
+            uint64_t sx = (uint64_t)scale[5] + (uint64_t)x * scale[3];
+            unsigned int x0 = MIN(sx >> 16, sw - 1);
+            unsigned int x1 = MIN(x0 + 1, sw - 1);
+            uint32_t a = ati_load_pixel(&ctx, input +
+                                        ((size_t)y0 * sw + x0) * cpp);
+
+            if (!(s->regs.scale_3d_cntl & BIT(8)) && cpp != 1) {
+                uint32_t b = ati_load_pixel(&ctx, input +
+                                            ((size_t)y0 * sw + x1) * cpp);
+                uint32_t c = ati_load_pixel(&ctx, input +
+                                            ((size_t)y1 * sw + x0) * cpp);
+                uint32_t d = ati_load_pixel(&ctx, input +
+                                            ((size_t)y1 * sw + x1) * cpp);
+
+                a = ati_2d_scale_blend(a, b, c, d, sx & 0xffff, sy & 0xffff,
+                                      datatype);
+            }
+            ati_store_pixel(&ctx, output + ((size_t)y * dw + x) * cpp,
+                             make_filler(ctx.bpp, a));
+        }
+    }
+    ctx.src_bits = output;
+    ctx.src_stride = dw * cpp;
+    ctx.src_tile = 0;
+    ctx.host_data_active = true;
+    ctx.source_clip_active = false;
+    ctx.left_to_right = ctx.top_to_bottom = true;
+    qemu_rect_init(&ctx.src, 0, 0, dw, dh);
+    qemu_rect_init(&ctx.dst, ati_coord_14(scale[7] >> 16),
+                   ati_coord_14(scale[7]), dw, dh);
+    ati_2d_do_blt(s, &ctx, 0, false);
+    ati_2d_complete(s);
+}
+
+static uint32_t *ati_2d_extra_register(ATIVGAState *s, hwaddr address)
+{
+    if (address >= DST_BRES_ERR && address <= DST_BRES_DEC) {
+        return &s->regs.bres[(address - DST_BRES_ERR) / 4];
+    }
+    if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        return NULL;
+    }
+    if (address >= LEAD_BRES_ERR && address <= LEAD_BRES_DEC) {
+        return &s->regs.bres[(address - LEAD_BRES_ERR) / 4];
+    }
+    if (address >= TRAIL_BRES_ERR && address <= TRAIL_X) {
+        return &s->regs.trail[(address - TRAIL_BRES_ERR) / 4];
+    }
+    if (address >= SCALE_SRC_HEIGHT_WIDTH &&
+        address <= SCALE_DST_HEIGHT_WIDTH) {
+        return &s->regs.scale[(address - SCALE_SRC_HEIGHT_WIDTH) / 4];
+    }
+    if (address == SCALE_3D_CNTL) {
+        return &s->regs.scale_3d_cntl;
+    }
+    if (address == SCALE_3D_DATATYPE) {
+        return &s->regs.scale_3d_datatype;
+    }
+    return NULL;
+}
+
+bool ati_2d_reg_read(ATIVGAState *s, hwaddr addr, uint64_t *value,
+                     unsigned int size)
+{
+    uint32_t *reg = ati_2d_extra_register(s, addr & ~3U);
+
+    if (!reg || (addr & 3) + size > 4) {
+        return false;
+    }
+    *value = extract32(*reg, (addr & 3) * 8, size * 8);
+    return true;
+}
+
+bool ati_2d_reg_write(ATIVGAState *s, hwaddr addr, uint64_t value,
+                      unsigned int size)
+{
+    uint32_t *reg = ati_2d_extra_register(s, addr & ~3U);
+
+    if (reg && (addr & 3) + size <= 4) {
+        *reg = deposit32(*reg, (addr & 3) * 8, size * 8, value);
+        if (addr >= SCALE_DST_HEIGHT_WIDTH && addr + size ==
+            SCALE_DST_HEIGHT_WIDTH + 4) {
+            ati_2d_stretch(s);
+        }
+        return true;
+    }
+    if (size != 4) {
+        return false;
+    }
+    if (addr == DST_BRES_LNTH || addr == DST_BRES_LNTH_SUB) {
+        /* Subpixel commands use integer coordinates and lengths. */
+        ati_2d_bresenham(s, (value >> (addr == DST_BRES_LNTH_SUB ? 4 : 0)) &
+                            0x3fff);
+        return true;
+    }
+    if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (addr == LEAD_BRES_LNTH || addr == LEAD_BRES_LNTH_SUB) {
+            ati_2d_trapezoid(s, (value >>
+                                (addr == LEAD_BRES_LNTH_SUB ? 4 : 0)) &
+                                0x3fff);
+            return true;
+        }
+        if (addr == DST_X_SUB || addr == DST_Y_SUB || addr == TRAIL_X_SUB) {
+            uint32_t *coord = addr == DST_X_SUB ? &s->regs.dst_x :
+                              addr == DST_Y_SUB ? &s->regs.dst_y :
+                              &s->regs.trail[3];
+
+            *coord = (value >> 4) & 0x3fff;
+            return true;
+        }
+    }
+    return false;
 }

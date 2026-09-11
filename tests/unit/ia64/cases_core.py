@@ -1297,7 +1297,7 @@ test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
     "r30": 0x49656e69756e6547,
 }, entry=0x10)
 
-def _madison_cpuid_case(name, cpu):
+def _cpuid_case(name, cpu, version, features):
     return require_registers(name, [
         (0x10, 0x00, nop_m(), addl(31, 3, 0), nop_i()),
         (0x20, 0x00, mov_cpuid(29, 31), addl(31, 4, 0), nop_i()),
@@ -1305,16 +1305,26 @@ def _madison_cpuid_case(name, cpu):
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], {
         "ip": 0x40,
-        "r28": 0x0000000000000001,
-        "r29": 0x000000001f010504,
+        "r28": features,
+        "r29": version,
     }, entry=0x10, cpu=cpu)
 
 
-test_mov_cpuid_madison_model = _madison_cpuid_case(
-    "mov_cpuid_madison_model", "madison")
+test_mov_cpuid_madison_model = _cpuid_case(
+    "mov_cpuid_madison_model", "madison", 0x1f010504, 1)
 
-test_mov_cpuid_madison_zx6000_profile = _madison_cpuid_case(
-    "mov_cpuid_madison_zx6000_profile", "madison-zx6000")
+test_mov_cpuid_madison_1500_profile = _cpuid_case(
+    "mov_cpuid_madison_1500_profile", "madison-1500",
+    0x1f010504, 1)
+
+test_mov_cpuid_mckinley_model = _cpuid_case(
+    "mov_cpuid_mckinley_model", "mckinley", 0x1f000704, 1)
+
+test_mov_cpuid_madison_9m_model = _cpuid_case(
+    "mov_cpuid_madison_9m_model", "madison-1600-9m", 0x1f020204, 1)
+
+test_mov_cpuid_montvale_model = _cpuid_case(
+    "mov_cpuid_montvale_model", "montvale", 0x20010104, 5)
 
 
 def _merced_cpuid_case(name, cpu):
@@ -3483,6 +3493,36 @@ test_predicate_register_roundtrip = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+def test_packed_immediate_shift_boundaries(qemu):
+    """Exercise every count, with in-place results and signed lanes."""
+    word = 0x80017fff80000001
+    for bits, right, left in ((16, pshr2, pshl2_fixed),
+                              (32, pshr4, pshl4_fixed)):
+        mask = (1 << bits) - 1
+        for count in range(32):
+            expected = [0, 0, 0]
+            for offset in range(0, 64, bits):
+                unsigned = (word >> offset) & mask
+                signed = (unsigned - (1 << bits)
+                          if unsigned >> (bits - 1) else unsigned)
+                for k, value in enumerate((signed >> count, unsigned >> count,
+                                            unsigned << count)):
+                    expected[k] |= (value & mask) << offset
+            case = require_registers(
+                f"packed_immediate_shift_{bits}_{count}", [
+                    (0x10, *movl_mlx(8, word)),
+                    (0x20, *movl_mlx(9, word)),
+                    (0x30, *movl_mlx(10, word)),
+                    (0x40, 0x01, nop_m(), right(8, 8, count),
+                     right(9, 9, count, unsigned=True)),
+                    (0x50, 0x01, nop_m(), left(10, 10, count), nop_i()),
+                    (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+                ], {"ip": 0x60, "r8": expected[0], "r9": expected[1],
+                    "r10": expected[2], "exception": IA64_EXCP_NONE},
+                entry=0x10)
+            case(qemu)
+
+
 GROUP = 'core'
 CASE_NAMES = (
 
@@ -3613,9 +3653,12 @@ CASE_NAMES = (
     'mov_cpuid_indexed_decode',
     'mov_cpuid_itanium2_alias',
     'mov_cpuid_itanium_alias',
+    'mov_cpuid_madison_9m_model',
     'mov_cpuid_madison_model',
-    'mov_cpuid_madison_zx6000_profile',
+    'mov_cpuid_madison_1500_profile',
+    'mov_cpuid_mckinley_model',
     'mov_cpuid_merced_model',
+    'mov_cpuid_montvale_model',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',
     'mov_dbr_index8_reserved_register_field',
@@ -3729,6 +3772,7 @@ CASE_NAMES = (
     'vmsw_cpl3_madison_illegal_operation',
     'vmsw_cpl3_montecito_privileged_operation',
     'compare_update_decode',
+    'packed_immediate_shift_boundaries',
 )
 
 CASES = bind_cases(GROUP, CASE_NAMES, globals())

@@ -12,14 +12,14 @@ Machine models
 The machine models are grouped by processor generation:
 
 ``itanium-vpc`` and ``hp-i2000`` (Merced generation)
-  ``itanium-vpc`` defaults to the ``merced`` CPU model.  ``hp-i2000``
+  ``itanium-vpc`` defaults to the ``merced-800`` CPU model.  ``hp-i2000``
   emulates the Intel 460GX-based HP workstation and requires the same CPU
   model.  ``itanium-vpc`` uses PS/2 input.  ``hp-i2000`` retains its PS/2
   controller and defaults to a USB keyboard and tablet.
 
 ``itanium2-vpc`` and ``hp-zx6000`` (Itanium 2 generation)
-  ``itanium2-vpc`` defaults to the ``montecito`` CPU model.  ``hp-zx6000``
-  emulates the HP zx1-based workstation and requires ``madison-zx6000``.
+  ``itanium2-vpc`` defaults to the ``montecito-9050`` CPU model.  ``hp-zx6000``
+  emulates the HP zx1-based workstation and requires ``madison-1500``.
   Both default to a USB keyboard and tablet.
 
 ``hp-rx2660`` (Montecito generation)
@@ -30,6 +30,48 @@ The machine models are grouped by processor generation:
 ``hp-i2000`` and ``hp-zx6000`` two, and ``hp-rx2660`` eight.  Use
 ``-accel tcg,thread=multi`` for more than one CPU.
 
+CPU model names
+---------------
+
+Use ``-cpu generation-model_number`` to select a canonical CPU model, for
+example ``-cpu montecito-9010``.  For generations without processor numbers,
+the number is the clock in MHz.  A cache suffix is included only when models
+within a generation share that clock: ``madison-1500``, but
+``madison-1600-3m`` and ``madison-1600-9m``.
+
+.. list-table:: Canonical CPU models and generation aliases
+   :header-rows: 1
+   :widths: 15 60 25
+
+   * - Generation alias
+     - Canonical models
+     - Alias target
+   * - ``merced``
+     - ``merced-800``
+     - ``merced-800``
+   * - ``mckinley``
+     - ``mckinley-900``, ``mckinley-1000``
+     - ``mckinley-1000``
+   * - ``deerfield``
+     - ``deerfield-1000``
+     - ``deerfield-1000``
+   * - ``madison``
+     - ``madison-1400-1.5m``, ``madison-1400-4m``, ``madison-1500``,
+       ``madison-1600-3m``, ``madison-1600-9m``
+     - ``madison-1600-3m``
+   * - ``montecito``
+     - ``montecito-9010``, ``montecito-9015``, ``montecito-9020``,
+       ``montecito-9030``, ``montecito-9040``, ``montecito-9050``
+     - ``montecito-9050``
+   * - ``montvale``
+     - ``montvale-9110n``, ``montvale-9120n``, ``montvale-9130m``,
+       ``montvale-9140m``, ``montvale-9140n``, ``montvale-9150m``,
+       ``montvale-9150n``, ``montvale-9152m``
+     - ``montvale-9150n``
+
+``itanium`` aliases ``merced`` and ``itanium2`` aliases ``montecito``.
+``-cpu help`` displays both canonical names and alias targets.
+
 HP i2000 device layout
 ----------------------
 
@@ -39,12 +81,21 @@ on bus 04.  Its fixed devices are the Intel programmable interrupt device at
 Ethernet at ``00:05.0``, QLogic ISP12160 at ``01:00.0``, IHPC functions at
 ``01:0f.0`` and ``02:0f.0``, and Quadro2 Pro at ``03:00.0``.
 
-The programmable interrupt device, IHPC, and most 460GX configuration functions
-implement PCI enumeration only.  The 460GX memory-card A/B configuration
-functions are not implemented.  The CS4281 implements a subset of its PCI and
-AC '97 interfaces, including playback and capture on DMA channels 0 and 1.
+The programmable interrupt device's PCI function supplies its identity; the
+interrupt delivery path uses the separate 460GX SAPIC model.  IHPC supports
+slot power control, hotplug notifications, and guest-controlled removal.
+The 460GX memory-card A/B configuration functions expose memory-error logs;
+chipset errors are reported through the firmware RAS mailbox.
+The CS4281 supports primary AC '97 playback and capture routed through any of its
+four DMA channels, including continuous DMA and half/terminal-count interrupts.
+Its legacy audio, FM synthesis, game port, MIDI, secondary codec and non-PCM
+serial slots remain unimplemented.
 The ISP12160 models mailboxes, queues, and SCSI I/O; its onboard RISC firmware
-does not execute.  The 82559 Flash aperture contains no Flash storage.
+does not execute.  SIMPLE, HEAD and ORDERED tags control per-LUN dispatch.
+IOCB timeouts include time spent waiting in the queue.  Target autosense,
+per-command autosense suppression, initiator IDs, queue depth and execution
+throttle settings are supported.  Queued requests and deadlines migrate.
+The 82559 Flash aperture contains no Flash storage.
 ``-vga ati`` places an ATI adapter at ``03:00.0``.
 
 HP zx6000 device layout
@@ -60,23 +111,121 @@ The 82550 Flash aperture contains no Flash storage.
 HP Integrity rx2660
 -------------------
 
-The rx2660 accepts ``montecito-9010`` (one core, 6 MiB L3) and
-``montecito-9040`` (two cores, 18 MiB L3), both at 1.6 GHz.  The 9010 has one
-thread per core; the 9040 supports one or two.  The machine supports up to two
-sockets.  CPU hotplug is unsupported, so ``maxcpus`` must equal ``cpus``.
+The rx2660 accepts ``montecito-9010`` (default), ``montecito-9020``,
+``montecito-9040``, ``montvale-9110n``, ``montvale-9120n``, and
+``montvale-9140m``.  The 9010 and 9110n have one core and one thread per
+socket; the other supported models have two cores and one or two threads per
+core.  The machine supports up to two sockets.  CPU hotplug is unsupported,
+so ``maxcpus`` must equal ``cpus``.
 
 RAM ranges from 1 GiB to 32 GiB, with an 8 GiB default.  Default devices are
 five PCI/PCI-X roots with ACPI UIDs 0, 0x200, 0x300, 0x600, and 0x700,
 RN50/ES1000 VGA, two NEC OHCI functions and one EHCI function, an LSI SAS1068,
-and two BCM5704 functions.  The MIO exposes zx2 IDs, but its registers and the
-root adapters reuse zx1 behavior; zx2 multi-rope LBA grouping is not
-implemented.
+and two BCM5704 functions.  The MIO exposes zx2 IDs and four IOMMU contexts
+selected through rope-group mappings.  The IOMMU translation engine and
+PCI/PCI-X root adapters reuse zx1 behavior.  All rope groups initially use
+context zero, which is configured through the common IOC register bank.
 
-PCIe, Core-I/O management, and iLO/BMC are not implemented.  Core-I/O
-functions ``103c:1303``, ``103c:1302``, and ``103c:1048`` enumerate at
-``00:01``.
+The onboard BCM5704 functions use subsystem identity ``103c:1311`` for guest
+compatibility; this value has not been verified for physical rx2660 hardware.
+Snapshots retain their saved PCI subsystem IDs.
 
-The BCM5701 and BCM5704 expose PCI configuration only.
+PCIe, Core-I/O management, and iLO/BMC are not implemented.  Management
+functions ``103c:1303`` and ``103c:1302`` enumerate at ``00:01`` but do not
+provide management services.  The ``103c:1048`` console function implements
+a 16550 UART at BAR1, including FIFOs, interrupts and migration.  It uses the
+first serial backend, so ``-serial stdio`` connects this UART to the terminal.
+The firmware console descriptor and EFI device path identify this PCI UART.
+The two PDH UARTs use the second and third serial backends.
+
+Storage completion and Ethernet
+-------------------------------
+
+The LSI53C895A honors HEAD and ORDERED tasks across disconnect/reselect.
+Migration requires its requests to have completed; an active request returns
+a migration error.  LSI53C1030 and SAS1068 implement IOC Page 1 reply coalescing
+with a completion-count threshold and a timer in microseconds.  Reading the
+reply FIFO through its empty indication acknowledges the notification.
+
+The Intel 82550/82559 receive path supports CRC transfer and IEEE 802.3
+padding stripping.  CRCs cover the original padded wire frame.  The e1000
+implements RDTR/TIDV relative completion timers with RADV/TADV absolute caps,
+in addition to ITR throttling.  Controller resets cancel pending notifications.
+
+The BCM5701 and BCM5704 implement PCI configuration and power-management
+capabilities, PHY discovery, EEPROM/NVRAM access, indirect register/SRAM access,
+descriptor DMA, transmit/receive, VLAN insertion/removal, transmit checksums,
+IPv4 TCP segmentation, statistics/status DMA and INTx interrupts.  Receive
+descriptors carry IPv4 and TCP/UDP checksum results, including bad checksums;
+fragments and UDP packets without a checksum do not claim transport checksum
+validation.  Host coalescing applies RX/TX completion-count thresholds and
+microsecond timers.  Pending coalescing state migrates.  Embedded
+processor execution is not implemented; reset supplies the modeled board data
+and firmware-mailbox handshake.  The option-ROM aperture contains no boot
+firmware, and network boot is unavailable.
+
+MMIO register and SRAM accesses honor the MISC_HOST_CTRL byte-swap bit,
+including byte and halfword accesses.  The two MISC_HOST_CTRL word-swap
+controls are not modeled; accesses retain the existing DWORD address layout.
+
+The zx6000's default network backend is attached to its Intel 82550.  To use
+the onboard Broadcom instead, select ``-nic user,model=bcm5701``.  The rx2660
+defaults to ``bcm5704``.
+
+Graphics coverage
+-----------------
+
+The ATI models support high-color/true-color scanout and VBE modes.
+The HP bridge supplies matching ATI COMBIOS metadata in the legacy ROM shadow
+and the default PCI option ROM, and initializes the default Radeon memory and
+system clocks consistently with those tables.  Explicitly supplied option ROMs
+are preserved.  Radeon CRT detection and DDC/EDID are implemented.
+The Radeon command processor handles rectangle fills and copies, transparent
+copies, connected lines, scanline spans, clipping, character bitmaps and
+indexed host bitmap uploads, including the setup-only packets used before
+character drawing.
+Scaler palettes are separate from the display DAC palette and are preserved
+across migration.  CRTC offset locking works through both register aliases.
+ATI hardware cursors are composited into the display at the programmed
+position.
+
+Native ATI scanout preserves the legacy VGA register bank.  Snapshots from
+implementations that overwrite this bank require the guest to reinitialize
+its VGA mode after restore.
+
+ATI 2D supports Bresenham lines, monochrome and color brushes, and Rage128
+stretch blits.  Rage128 trapezoids use an integer-coordinate approximation.
+Line and trapezoid setup registers retain their programmed values after drawing.
+Rage128 stretch uses replication or generic bilinear filtering in the
+destination pixel format.  Radeon tiled 2D and scanout support macrotiles in
+8-, 16- and 32-bit formats, plus 32-bit destination microtiles.  Rage128 tiled
+2D accesses are unimplemented and leave destination memory unchanged; tiled
+scanout returns zero pixel data.  Guests using Rage128 must select linear
+framebuffers for rendering and display.
+
+Radeon CPU accesses through aperture 0 use the configured color-surface tile
+mapping, consistently with 2D rendering and scanout.  Surface registers are
+preserved across migration.  ATI migration formats before version 9 omit
+surface registers; guests must reinitialize tiled surfaces after restore.
+
+PLL atomic requests complete immediately, and the primary CRTC timer follows
+the programmed pixel clock.  PLL settling and synchronization to vertical
+sync are not modeled.  MONID GPIO participates in DDC, and GUI idle completion
+latches its interrupt status.
+
+Quadro2 supports NV10/NV15 PFB tile regions in scanout and 2D DMA.  Long FIFO
+streams yield between commands and resume without reporting a hardware fault
+solely because a processing budget was exhausted.  Individual operations
+retain size and address bounds.
+
+Graphics emulation remains partial.  ATI overlay output, packed 24-bit tiled
+surfaces, 8-/16-bit Radeon destination microtiles, exact subpixel trapezoid
+coverage, and parts of the 3D pipeline remain unsupported.  NV15 3D object
+classes are not implemented.
+
+Technical references for these models are recorded in
+:doc:`../devel/device-emulation-provenance` and
+:doc:`../devel/gpu-emulation-provenance`.
 
 Building and running
 --------------------
@@ -106,19 +255,45 @@ present.  On both virtual PC models, drives without an explicit interface use
 the LSI53C895A SCSI controller.  ``itanium2-vpc`` also provides AHCI; attach
 AHCI media with ``if=none`` and an explicit ``ide-hd`` or ``ide-cd`` device.
 
+Windows host clock resolution
+-----------------------------
+
+When guest time follows the host clock, interval timer resolution depends on
+the Windows performance counter frequency.  For example, a 10 MHz host counter
+makes a 400 MHz guest timer advance in multiples of 40 ticks.  Counter
+frequencies vary by host; see Microsoft's
+`high-resolution time-stamp documentation
+<https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps>`_.
+
 ALAT model
 ----------
 
 ``alat=zero|full`` selects the IA-64 ALAT model.  Every machine and CPU model
-defaults to ``zero``.  The ``full`` model is restricted to one CPU;
-multi-CPU configurations warn and use ``zero``.
-Writable VFIO DMA mappings suppress entries in the ``full`` model while those
-mappings are active.  Direct writes by arbitrary processes to shared guest RAM
-are not observed.  IA-32 compatibility instructions execute exclusively when
-the ``full`` model is active.
+defaults to ``zero``.  The ``zero`` model treats every ALAT check as a miss,
+so check loads reload memory and advanced-load checks enter their recovery
+paths.  The ``full`` model maintains a 32-entry table per CPU and supports SMP.
+
+CPU stores publish per-CPU write sequences.  Advanced loads and ALAT checks
+validate those sequences together with the external RAM-write generation;
+ordinary stores do not update a shared CPU-writer counter.  Stores by the
+same CPU invalidate overlapping physical addresses, while writes by another
+CPU or a device conservatively invalidate the whole local ALAT.
+
+The ``full`` model skips guest reloads and recovery code on ALAT hits, while
+tracking and validation add host execution work.  Writable VFIO, vhost and
+remote-device DMA mappings suppress entries while those mappings are active.
+Direct writes by arbitrary processes to shared guest RAM are not observed.
+On CPU models with native IA-32 support, ``full`` executes IA-32 compatibility
+instructions exclusively when vCPUs would otherwise run in parallel.
+Montecito/Montvale models do not support native IA-32 execution.
 
 Virtual PC options
 ------------------
+
+``pcie=on|off``
+  Use a PCI Express root bus with extended configuration space when enabled.
+  The default is ``off``.  The ``ia64-pcie-root-port`` device provides AER
+  interrupts and platform error notifications.
 
 ``i8042=on|off``
   Select PS/2 input when enabled and USB input when disabled.  It defaults to

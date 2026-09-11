@@ -8,6 +8,9 @@
  *
  * Authors: Don Slutz, Paolo Bonzini
  *
+ * Technical references are listed in
+ * docs/devel/device-emulation-provenance.rst.
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
@@ -52,6 +55,70 @@
      MPI_FW_HEADER_PID_PROD_INITIATOR_SCSI |   \
      MPI_FW_HEADER_PID_TYPE_SCSI)
 
+#define MPT_FW_VERSION 0x01329200
+#define MPT_MSG_VERSION 0x0105
+#define MPT_NVDATA_FORMAT_VERSION 0x2d
+#define MPT_NVDATA_VERSION (MPT_NVDATA_FORMAT_VERSION << 8)
+#define MPT_NVDATA_HEADER_SIGNATURE 0x4e69636b
+#define MPT_NVDATA_PRODUCT_SIGNATURE 0x4672617a
+#define MPT_NVDATA_STATE_VALID 0xf8
+
+typedef struct QEMU_PACKED MPTNvdataHeader {
+    uint32_t signature;
+    uint8_t state;
+    uint8_t checksum;
+    uint16_t total_bytes;
+    uint16_t nvdata_version;
+    uint16_t mpi_version;
+    uint8_t header_words;
+    uint8_t directory_entry_words;
+    uint8_t persistent_header_words;
+    uint8_t product_id_words;
+    uint32_t directory_entries;
+    uint32_t persistent_entries;
+    uint32_t seeprom_fw_vars_offset;
+    uint32_t seeprom_buffer_offset;
+    uint32_t reserved;
+} MPTNvdataHeader;
+
+typedef struct QEMU_PACKED MPTNvdataProductId {
+    uint32_t signature;
+    char vendor[8];
+    char product[16];
+    char revision[4];
+    uint32_t reserved[8];
+} MPTNvdataProductId;
+
+typedef struct QEMU_PACKED MPTNvdataDirectoryEntry {
+    uint32_t page_flags;
+    uint32_t page_location;
+} MPTNvdataDirectoryEntry;
+
+typedef struct QEMU_PACKED MPTNvdataPersistentHeader {
+    uint8_t state;
+    uint8_t checksum;
+    uint16_t next_dword_offset;
+} MPTNvdataPersistentHeader;
+
+typedef struct QEMU_PACKED MPTNvdataImage {
+    MPTNvdataHeader header;
+    MPTNvdataProductId product_id;
+} MPTNvdataImage;
+
+#define MPT_NVDATA_SIZE sizeof(MPTNvdataImage)
+#define MPT_FW_IMAGE_SIZE (MPI_FW_HEADER_SIZE + MPI_EXT_IMAGE_HEADER_SIZE + \
+                          MPT_NVDATA_SIZE)
+#define MPT_FW_IMAGE_MAX_SIZE 0x400000
+
+/* Slot indicators exclude power switching and physical bypass controls. */
+#define MPTSAS_ENCLOSURE_INDICATORS 0x008213ff
+
+static size_t mptsas_fw_image_size(MPTSASState *s)
+{
+    return s->fw_image_size ? s->fw_image_size :
+           mptsas_is_spi(s) ? MPI_FW_HEADER_SIZE : MPT_FW_IMAGE_SIZE;
+}
+
 struct MPTSASRequest {
     MPIMsgSCSIIORequest scsi_io;
     SCSIRequest *sreq;
@@ -66,15 +133,56 @@ static void mptsas_update_interrupt(MPTSASState *s)
     PCIDevice *pci = (PCIDevice *) s;
     uint32_t state = s->intr_status & ~(s->intr_mask | MPI_HIS_IOP_DOORBELL_STATUS);
 
+    if (!s->reply_irq_ready) {
+        state &= ~MPI_HIS_REPLY_MESSAGE_INTERRUPT;
+    }
     if (msi_enabled(pci)) {
-        if (state) {
+        if (state & ~s->irq_state) {
             trace_mptsas_irq_msi(s);
             msi_notify(pci, 0);
         }
     }
 
-    trace_mptsas_irq_intx(s, !!state);
-    pci_set_irq(pci, !!state);
+    s->irq_state = state;
+    trace_mptsas_irq_intx(s, state && !msi_enabled(pci));
+    pci_set_irq(pci, state && !msi_enabled(pci));
+}
+
+static void mptsas_coalescing_expired(void *opaque)
+{
+    MPTSASState *s = opaque;
+
+    timer_del(s->coalescing_timer);
+    s->coalescing_count = 0;
+    s->reply_irq_ready = true;
+    mptsas_update_interrupt(s);
+}
+
+void mptsas_coalescing_changed(MPTSASState *s)
+{
+    if (!s->coalescing_count) {
+        return;
+    }
+    if (!(s->ioc1_flags & MPI_IOCPAGE1_REPLY_COALESCING) ||
+        (!s->ioc1_coalescing_timeout && !s->ioc1_coalescing_depth) ||
+        (s->ioc1_coalescing_depth &&
+         s->coalescing_count >= s->ioc1_coalescing_depth)) {
+        mptsas_coalescing_expired(s);
+    } else if (s->ioc1_coalescing_timeout &&
+               !timer_pending(s->coalescing_timer)) {
+        timer_mod(s->coalescing_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  (uint64_t)s->ioc1_coalescing_timeout * 1000);
+    }
+}
+
+static void mptsas_reply_interrupt(MPTSASState *s)
+{
+    if (!s->reply_irq_ready) {
+        s->coalescing_count++;
+        mptsas_coalescing_changed(s);
+    }
+    mptsas_update_interrupt(s);
 }
 
 static void mptsas_set_fault(MPTSASState *s, uint32_t code)
@@ -127,7 +235,7 @@ static void mptsas_post_reply(MPTSASState *s, MPIDefaultReply *reply)
         s->doorbell_state = DOORBELL_NONE;
         s->intr_status |= MPI_HIS_DOORBELL_INTERRUPT;
     }
-    mptsas_update_interrupt(s);
+    mptsas_reply_interrupt(s);
 }
 
 void mptsas_reply(MPTSASState *s, MPIDefaultReply *reply)
@@ -158,10 +266,11 @@ static void mptsas_turbo_reply(MPTSASState *s, uint32_t msgctx)
     MPTSAS_FIFO_PUT(s, reply_post, msgctx);
 
     s->intr_status |= MPI_HIS_REPLY_MESSAGE_INTERRUPT;
-    mptsas_update_interrupt(s);
+    mptsas_reply_interrupt(s);
 }
 
 #define MPTSAS_MAX_REQUEST_SIZE 52
+#define MPTSAS_REQUEST_FRAME_SIZE 128
 
 static const int mpi_request_sizes[] = {
     [MPI_FUNCTION_SCSI_IO_REQUEST]    = sizeof(MPIMsgSCSIIORequest),
@@ -172,6 +281,11 @@ static const int mpi_request_sizes[] = {
     [MPI_FUNCTION_PORT_FACTS]         = sizeof(MPIMsgPortFacts),
     [MPI_FUNCTION_PORT_ENABLE]        = sizeof(MPIMsgPortEnable),
     [MPI_FUNCTION_EVENT_NOTIFICATION] = sizeof(MPIMsgEventNotify),
+    [MPI_FUNCTION_FW_UPLOAD]         = sizeof(MPIMsgFWUpload),
+    [MPI_FUNCTION_FW_DOWNLOAD]       = sizeof(MPIMsgFWDownload),
+    [MPI_FUNCTION_TOOLBOX]           = sizeof(MPIMsgToolboxClean),
+    [MPI_FUNCTION_SAS_IO_UNIT_CONTROL] = sizeof(MPIMsgSASIOUnitControl),
+    [MPI_FUNCTION_SCSI_ENCLOSURE_PROCESSOR] = sizeof(MPIMsgSEP),
 };
 
 static dma_addr_t mptsas_ld_sg_base(MPTSASState *s, uint32_t flags_and_length,
@@ -210,6 +324,11 @@ static int mptsas_build_sgl(MPTSASState *s, MPTSASRequest *req, hwaddr req_addr)
     sgaddr = req_addr + sizeof(MPIMsgSCSIIORequest);
     pci_dma_sglist_init(&req->qsg, pci, 4);
     left = req->scsi_io.DataLength;
+
+    /* Commands without a data phase do not carry a scatter/gather list. */
+    if (!left) {
+        return 0;
+    }
 
     for(;;) {
         dma_addr_t addr, len;
@@ -273,8 +392,20 @@ static void mptsas_free_request(MPTSASRequest *req)
     g_free(req);
 }
 
+static int mptsas_scsi_lun(const uint8_t lun[8])
+{
+    /* Only bus-zero peripheral and flat-space addresses are represented. */
+    if ((lun[0] != 0 && (lun[0] & 0xc0) != 0x40) ||
+        lun[2] || lun[3] || lun[4] || lun[5] || lun[6] || lun[7]) {
+        /* An unrepresented address must not alias an attached logical unit. */
+        return -1;
+    }
+
+    return lduw_be_p(lun) & 0x3fff;
+}
+
 static int mptsas_scsi_device_find(MPTSASState *s, int bus, int target,
-                                   uint8_t *lun, SCSIDevice **sdev)
+                                   int lun, SCSIDevice **sdev)
 {
     if (bus != 0) {
         return MPI_IOCSTATUS_SCSI_INVALID_BUS;
@@ -284,7 +415,7 @@ static int mptsas_scsi_device_find(MPTSASState *s, int bus, int target,
         return MPI_IOCSTATUS_SCSI_INVALID_TARGETID;
     }
 
-    *sdev = scsi_device_find(&s->bus, bus, target, lun[1]);
+    *sdev = scsi_device_find(&s->bus, bus, target, lun);
     if (!*sdev) {
         return MPI_IOCSTATUS_SCSI_DEVICE_NOT_THERE;
     }
@@ -299,15 +430,18 @@ static int mptsas_process_scsi_io_request(MPTSASState *s,
     MPTSASRequest *req;
     MPIMsgSCSIIOReply reply;
     SCSIDevice *sdev;
-    int status;
+    int status, lun;
 
     mptsas_fix_scsi_io_endianness(scsi_io);
+    lun = mptsas_scsi_lun(scsi_io->LUN);
 
     trace_mptsas_process_scsi_io_request(s, scsi_io->Bus, scsi_io->TargetID,
-                                         scsi_io->LUN[1], scsi_io->DataLength);
+                                         lun, scsi_io->DataLength,
+                                         scsi_io->CDB[0], scsi_io->Control,
+                                         ldq_be_p(scsi_io->LUN));
 
     status = mptsas_scsi_device_find(s, scsi_io->Bus, scsi_io->TargetID,
-                                     scsi_io->LUN, &sdev);
+                                     lun, &sdev);
     if (status) {
         goto bad;
     }
@@ -328,31 +462,35 @@ static int mptsas_process_scsi_io_request(MPTSASState *s,
         goto free_bad;
     }
 
-    req->sreq = scsi_req_new(sdev, scsi_io->MsgContext,
-                             scsi_io->LUN[1], scsi_io->CDB,
+    req->sreq = scsi_req_new(sdev, scsi_io->MsgContext, lun, scsi_io->CDB,
                              scsi_io->CDBLength, req);
 
     if (req->sreq->cmd.xfer > scsi_io->DataLength) {
         goto overrun;
     }
-    switch (scsi_io->Control & MPI_SCSIIO_CONTROL_DATADIRECTION_MASK) {
-    case MPI_SCSIIO_CONTROL_NODATATRANSFER:
-        if (req->sreq->cmd.mode != SCSI_XFER_NONE) {
-            goto overrun;
-        }
-        break;
+    /* Transfer direction is irrelevant when there is no data phase. */
+    if (req->sreq->cmd.xfer) {
+        switch (scsi_io->Control & MPI_SCSIIO_CONTROL_DATADIRECTION_MASK) {
+        case MPI_SCSIIO_CONTROL_NODATATRANSFER:
+            if (req->sreq->cmd.mode != SCSI_XFER_NONE) {
+                goto overrun;
+            }
+            break;
 
-    case MPI_SCSIIO_CONTROL_WRITE:
-        if (req->sreq->cmd.mode != SCSI_XFER_TO_DEV) {
-            goto overrun;
-        }
-        break;
+        case MPI_SCSIIO_CONTROL_WRITE:
+            if (req->sreq->cmd.mode != SCSI_XFER_TO_DEV) {
+                goto overrun;
+            }
+            break;
 
-    case MPI_SCSIIO_CONTROL_READ:
-        if (req->sreq->cmd.mode != SCSI_XFER_FROM_DEV) {
-            goto overrun;
+        case MPI_SCSIIO_CONTROL_READ:
+            if (req->sreq->cmd.mode != SCSI_XFER_FROM_DEV) {
+                goto overrun;
+            }
+            break;
         }
-        break;
+    } else {
+        req->sreq->residual = scsi_io->DataLength;
     }
 
     if (scsi_req_enqueue(req->sreq)) {
@@ -367,6 +505,7 @@ overrun:
 free_bad:
     mptsas_free_request(req);
 bad:
+    trace_mptsas_scsi_request_error(s, scsi_io->MsgContext, status);
     memset(&reply, 0, sizeof(reply));
     reply.TargetID          = scsi_io->TargetID;
     reply.Bus               = scsi_io->Bus;
@@ -410,12 +549,13 @@ static void mptsas_process_scsi_task_mgmt(MPTSASState *s, MPIMsgSCSITaskMgmt *re
 {
     MPIMsgSCSITaskMgmtReply reply;
     MPIMsgSCSITaskMgmtReply *reply_async;
-    int status, count;
+    int status, count, lun;
     SCSIDevice *sdev;
     SCSIRequest *r, *next;
     BusChild *kid;
 
     mptsas_fix_scsi_task_mgmt_endianness(req);
+    lun = mptsas_scsi_lun(req->LUN);
 
     QEMU_BUILD_BUG_ON(MPTSAS_MAX_REQUEST_SIZE < sizeof(*req));
     QEMU_BUILD_BUG_ON(sizeof(s->doorbell_msg) < sizeof(*req));
@@ -433,12 +573,12 @@ static void mptsas_process_scsi_task_mgmt(MPTSASState *s, MPIMsgSCSITaskMgmt *re
     case MPI_SCSITASKMGMT_TASKTYPE_ABORT_TASK:
     case MPI_SCSITASKMGMT_TASKTYPE_QUERY_TASK:
         status = mptsas_scsi_device_find(s, req->Bus, req->TargetID,
-                                         req->LUN, &sdev);
+                                         lun, &sdev);
         if (status) {
             reply.IOCStatus = status;
             goto out;
         }
-        if (sdev->lun != req->LUN[1]) {
+        if (sdev->lun != lun) {
             reply.ResponseCode = MPI_SCSITASKMGMT_RSP_TM_INVALID_LUN;
             goto out;
         }
@@ -480,12 +620,12 @@ static void mptsas_process_scsi_task_mgmt(MPTSASState *s, MPIMsgSCSITaskMgmt *re
     case MPI_SCSITASKMGMT_TASKTYPE_ABRT_TASK_SET:
     case MPI_SCSITASKMGMT_TASKTYPE_CLEAR_TASK_SET:
         status = mptsas_scsi_device_find(s, req->Bus, req->TargetID,
-                                         req->LUN, &sdev);
+                                         lun, &sdev);
         if (status) {
             reply.IOCStatus = status;
             goto out;
         }
-        if (sdev->lun != req->LUN[1]) {
+        if (sdev->lun != lun) {
             reply.ResponseCode = MPI_SCSITASKMGMT_RSP_TM_INVALID_LUN;
             goto out;
         }
@@ -518,12 +658,12 @@ reply_maybe_async:
 
     case MPI_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET:
         status = mptsas_scsi_device_find(s, req->Bus, req->TargetID,
-                                         req->LUN, &sdev);
+                                         lun, &sdev);
         if (status) {
             reply.IOCStatus = status;
             goto out;
         }
-        if (sdev->lun != req->LUN[1]) {
+        if (sdev->lun != lun) {
             reply.ResponseCode = MPI_SCSITASKMGMT_RSP_TM_INVALID_LUN;
             goto out;
         }
@@ -602,6 +742,8 @@ static void mptsas_process_ioc_facts(MPTSASState *s,
                                      MPIMsgIOCFacts *req)
 {
     MPIMsgIOCFactsReply reply;
+    uint32_t version = s->fw_image ? ldl_le_p(s->fw_image + 0x24) :
+                                    MPT_FW_VERSION;
 
     mptsas_fix_ioc_facts_endianness(req);
 
@@ -610,7 +752,7 @@ static void mptsas_process_ioc_facts(MPTSASState *s,
     QEMU_BUILD_BUG_ON(sizeof(s->doorbell_reply) < sizeof(reply));
 
     memset(&reply, 0, sizeof(reply));
-    reply.MsgVersion                 = 0x0105;
+    reply.MsgVersion                 = MPT_MSG_VERSION;
     reply.MsgLength                  = sizeof(reply) / 4;
     reply.Function                   = req->Function;
     reply.MsgContext                 = req->MsgContext;
@@ -620,7 +762,8 @@ static void mptsas_process_ioc_facts(MPTSASState *s,
     reply.ReplyQueueDepth            = ARRAY_SIZE(s->reply_post) - 1;
     QEMU_BUILD_BUG_ON(ARRAY_SIZE(s->reply_post) != ARRAY_SIZE(s->reply_free));
 
-    reply.RequestFrameSize           = 128;
+    /* RequestFrameSize is expressed in 32-bit words. */
+    reply.RequestFrameSize           = MPTSAS_REQUEST_FRAME_SIZE / 4;
     reply.ProductID                  = mptsas_is_spi(s) ?
                                        MPTSPI1030_PRODUCT_ID :
                                        MPTSAS1068_PRODUCT_ID;
@@ -631,10 +774,11 @@ static void mptsas_process_ioc_facts(MPTSASState *s,
     reply.CurReplyFrameSize          = s->reply_frame_size;
     reply.MaxDevices                 = s->max_devices;
     reply.MaxBuses                   = s->max_buses;
-    reply.FWVersionDev               = 0;
-    reply.FWVersionUnit              = 0x92;
-    reply.FWVersionMinor             = 0x32;
-    reply.FWVersionMajor             = 0x1;
+    reply.FWImageSize                = mptsas_fw_image_size(s);
+    reply.FWVersionDev               = version & 0xff;
+    reply.FWVersionUnit              = (version >> 8) & 0xff;
+    reply.FWVersionMinor             = (version >> 16) & 0xff;
+    reply.FWVersionMajor             = version >> 24;
 
     mptsas_fix_ioc_facts_reply_endianness(&reply);
     mptsas_reply(s, (MPIDefaultReply *)&reply);
@@ -732,8 +876,374 @@ static void mptsas_process_event_notification(MPTSASState *s,
     mptsas_reply(s, (MPIDefaultReply *)&reply);
 }
 
+static void mptsas_fw_image(MPTSASState *s, uint8_t *image)
+{
+    uint32_t checksum = 0;
+    unsigned i;
+
+    /* The IOC runs directly in the model; its image contains only metadata. */
+    memset(image, 0, MPT_FW_IMAGE_SIZE);
+    stl_le_p(image + 0x04, MPI_FW_HEADER_SIGNATURE_0);
+    stl_le_p(image + 0x08, MPI_FW_HEADER_SIGNATURE_1);
+    stl_le_p(image + 0x0c, MPI_FW_HEADER_SIGNATURE_2);
+    stw_le_p(image + 0x20, PCI_VENDOR_ID_LSI_LOGIC);
+    stw_le_p(image + 0x22, mptsas_is_spi(s) ? MPTSPI1030_PRODUCT_ID :
+                                            MPTSAS1068_PRODUCT_ID);
+    stl_le_p(image + 0x24, MPT_FW_VERSION);
+    stl_le_p(image + 0x2c, MPI_FW_HEADER_SIZE);
+    stl_le_p(image + 0x40, MPI_FW_HEADER_WHAT_SIGNATURE);
+    memcpy(image + 0x44, "Fusion-MPT emulation", 20);
+    stl_le_p(image + 0x64, MPI_FW_HEADER_WHAT_SIGNATURE);
+    memcpy(image + 0x68, "QEMU", 5);
+    if (!mptsas_is_spi(s)) {
+        uint8_t *ext = image + MPI_FW_HEADER_SIZE;
+        const MPTNvdataImage nvdata = {
+            .header = {
+                .signature = cpu_to_le32(MPT_NVDATA_HEADER_SIGNATURE),
+                .state = MPT_NVDATA_STATE_VALID,
+                .total_bytes = cpu_to_le16(sizeof(nvdata)),
+                .nvdata_version = cpu_to_le16(MPT_NVDATA_VERSION),
+                .mpi_version = cpu_to_le16(MPT_MSG_VERSION),
+                .header_words = sizeof(MPTNvdataHeader) / 4,
+                .directory_entry_words = sizeof(MPTNvdataDirectoryEntry) / 4,
+                .persistent_header_words =
+                    sizeof(MPTNvdataPersistentHeader) / 4,
+                .product_id_words = sizeof(MPTNvdataProductId) / 4,
+            },
+            .product_id = {
+                .signature = cpu_to_le32(MPT_NVDATA_PRODUCT_SIGNATURE),
+                .vendor = "QEMU",
+                .product = "QEMU MPT Fusion",
+                .revision = "2.5",
+            },
+        };
+
+        stl_le_p(image + 0x10, MPT_NVDATA_VERSION);
+        stl_le_p(image + 0x30, MPI_FW_HEADER_SIZE);
+        ext[0] = MPI_EXT_IMAGE_TYPE_NVDATA;
+        stl_le_p(ext + 8, MPI_EXT_IMAGE_HEADER_SIZE + MPT_NVDATA_SIZE);
+
+        memcpy(ext + MPI_EXT_IMAGE_HEADER_SIZE, &nvdata, sizeof(nvdata));
+        for (i = 0; i < MPI_EXT_IMAGE_HEADER_SIZE + MPT_NVDATA_SIZE; i += 4) {
+            checksum += ldl_le_p(ext + i);
+        }
+        stl_le_p(ext + 4, -checksum);
+        checksum = 0;
+    }
+    for (i = 0; i < MPI_FW_HEADER_SIZE; i += 4) {
+        checksum += ldl_le_p(image + i);
+    }
+    stl_le_p(image + 0x1c, -checksum);
+}
+
+static void mptsas_process_fw_upload(MPTSASState *s, MPIMsgFWUpload *req)
+{
+    MPIMsgFWUploadReply reply = {
+        .ImageType = req->ImageType,
+        .MsgLength = sizeof(reply) / 4,
+        .Function = req->Function,
+        .MsgContext = req->MsgContext,
+    };
+    uint8_t metadata[MPT_FW_IMAGE_SIZE];
+    const uint8_t *image = s->fw_image;
+    size_t image_size = mptsas_fw_image_size(s);
+    uint32_t flags, offset = 0, length = 0;
+    uint32_t transfer_length;
+    dma_addr_t address = 0;
+    uint16_t status = MPI_IOCSTATUS_SUCCESS;
+
+    QEMU_BUILD_BUG_ON(MPTSAS_MAX_REQUEST_SIZE < sizeof(*req));
+    QEMU_BUILD_BUG_ON(sizeof(s->doorbell_reply) < sizeof(reply));
+
+    if (req->ImageType != MPI_FW_UPLOAD_ITYPE_FW_IOC_MEM &&
+        req->ImageType != MPI_FW_UPLOAD_ITYPE_FW_FLASH) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+        goto done;
+    }
+    if (s->doorbell_state == DOORBELL_WRITE &&
+        s->doorbell_cnt * 4 < offsetof(MPIMsgFWUpload, SGL) + 8) {
+        status = MPI_IOCSTATUS_INVALID_SGL;
+        goto done;
+    }
+    offset = le32_to_cpu(req->TC.ImageOffset);
+    length = le32_to_cpu(req->TC.ImageSize);
+    flags = le32_to_cpu(req->SGL.FlagsLength);
+    if (req->ChainOffset || req->TC.ContextSize ||
+        req->TC.DetailsLength != 12 || req->TC.Flags ||
+        (flags & (MPI_SGE_FLAGS_ELEMENT_TYPE_MASK |
+                  MPI_SGE_FLAGS_LOCAL_ADDRESS | MPI_SGE_FLAGS_DIRECTION)) !=
+            MPI_SGE_FLAGS_SIMPLE_ELEMENT ||
+        ((flags & MPI_SGE_FLAGS_64_BIT_ADDRESSING) &&
+         s->doorbell_state == DOORBELL_WRITE &&
+         s->doorbell_cnt * 4 < sizeof(*req))) {
+        status = MPI_IOCSTATUS_INVALID_SGL;
+        goto done;
+    }
+    if (offset > image_size) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+        goto done;
+    }
+    transfer_length = MIN(length, image_size - offset);
+    if ((flags & MPI_SGE_LENGTH_MASK) < transfer_length) {
+        status = MPI_IOCSTATUS_INVALID_SGL;
+        goto done;
+    }
+    address = flags & MPI_SGE_FLAGS_64_BIT_ADDRESSING ?
+              le64_to_cpu(req->SGL.u.Address64) :
+              le32_to_cpu(req->SGL.u.Address32);
+    if (!image) {
+        mptsas_fw_image(s, metadata);
+        image = metadata;
+    }
+    if (pci_dma_write(PCI_DEVICE(s), address, image + offset,
+                      transfer_length) != MEMTX_OK) {
+        status = MPI_IOCSTATUS_INTERNAL_ERROR;
+        goto done;
+    }
+    reply.ActualImageSize = cpu_to_le32(image_size);
+done:
+    trace_mptsas_process_fw_upload(s, req->ImageType, offset, length,
+                                  address, status);
+    reply.IOCStatus = cpu_to_le16(status);
+    mptsas_reply(s, (MPIDefaultReply *)&reply);
+}
+
+static bool mptsas_fw_image_valid(const uint8_t *image, uint32_t size)
+{
+    uint32_t offset = 0, length, next;
+
+    if (size < MPI_FW_HEADER_SIZE || size > MPT_FW_IMAGE_MAX_SIZE ||
+        (size & 3) ||
+        (uint32_t)ldl_le_p(image + 4) != MPI_FW_HEADER_SIGNATURE_0 ||
+        (uint32_t)ldl_le_p(image + 8) != MPI_FW_HEADER_SIGNATURE_1 ||
+        (uint32_t)ldl_le_p(image + 12) != MPI_FW_HEADER_SIGNATURE_2 ||
+        lduw_le_p(image + 0x20) != PCI_VENDOR_ID_LSI_LOGIC) {
+        return false;
+    }
+    length = ldl_le_p(image + 0x2c);
+    next = ldl_le_p(image + 0x30);
+    for (;;) {
+        uint32_t checksum = 0;
+        uint32_t i;
+
+        if (length < (offset ? MPI_EXT_IMAGE_HEADER_SIZE :
+                               MPI_FW_HEADER_SIZE) ||
+            (length & 3) || length > size - offset) {
+            return false;
+        }
+        for (i = 0; i < length; i += 4) {
+            checksum += ldl_le_p(image + offset + i);
+        }
+        if (checksum) {
+            return false;
+        }
+        if (!next) {
+            return true;
+        }
+        if ((next & 3) || next < offset + length ||
+            next > size - MPI_EXT_IMAGE_HEADER_SIZE) {
+            return false;
+        }
+        offset = next;
+        length = ldl_le_p(image + offset + 8);
+        next = ldl_le_p(image + offset + 12);
+    }
+}
+
+static void mptsas_process_fw_download(MPTSASState *s, MPIMsgFWDownload *req)
+{
+    MPIDefaultReply reply = {
+        .Reserved = { req->ImageType, 0 },
+        .MsgLength = sizeof(reply) / 4,
+        .Function = req->Function,
+        .MsgContext = req->MsgContext,
+    };
+    uint32_t length = le32_to_cpu(req->TC.ImageSize);
+    uint32_t flags = le32_to_cpu(req->SGL.FlagsLength);
+    uint16_t status = MPI_IOCSTATUS_SUCCESS;
+    dma_addr_t address = 0;
+    g_autofree uint8_t *image = NULL;
+
+    if (req->ImageType != MPI_FW_DOWNLOAD_ITYPE_FW ||
+        req->MsgFlags != MPI_FW_DOWNLOAD_LAST_SEGMENT || req->TC.ImageOffset ||
+        length < MPI_FW_HEADER_SIZE || length > MPT_FW_IMAGE_MAX_SIZE) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+        goto done;
+    }
+    if (req->ChainOffset || req->TC.ContextSize ||
+        req->TC.DetailsLength != 12 || req->TC.Flags ||
+        (flags & (MPI_SGE_FLAGS_ELEMENT_TYPE_MASK |
+                  MPI_SGE_FLAGS_LOCAL_ADDRESS | MPI_SGE_FLAGS_DIRECTION)) !=
+            (MPI_SGE_FLAGS_SIMPLE_ELEMENT | MPI_SGE_FLAGS_HOST_TO_IOC) ||
+        (flags & MPI_SGE_LENGTH_MASK) < length ||
+        (s->doorbell_state == DOORBELL_WRITE &&
+         s->doorbell_cnt * 4 < offsetof(MPIMsgFWDownload, SGL) +
+             (flags & MPI_SGE_FLAGS_64_BIT_ADDRESSING ? 12 : 8))) {
+        status = MPI_IOCSTATUS_INVALID_SGL;
+        goto done;
+    }
+    address = flags & MPI_SGE_FLAGS_64_BIT_ADDRESSING ?
+              le64_to_cpu(req->SGL.u.Address64) :
+              le32_to_cpu(req->SGL.u.Address32);
+    image = g_malloc(length);
+    if (pci_dma_read(PCI_DEVICE(s), address, image, length) != MEMTX_OK) {
+        status = MPI_IOCSTATUS_INTERNAL_ERROR;
+        goto done;
+    }
+    if (!mptsas_fw_image_valid(image, length)) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+        goto done;
+    }
+    /* Retain flash contents for upload; the IOC runs directly in the model. */
+    g_free(s->fw_image);
+    s->fw_image = g_steal_pointer(&image);
+    s->fw_image_size = length;
+done:
+    trace_mptsas_process_fw_download(s, req->ImageType, length, address,
+                                    status);
+    reply.IOCStatus = cpu_to_le16(status);
+    mptsas_reply(s, &reply);
+}
+
+static void mptsas_process_toolbox(MPTSASState *s, MPIMsgToolboxClean *req)
+{
+    const uint32_t regions = MPI_TOOLBOX_CLEAN_NVSRAM |
+        MPI_TOOLBOX_CLEAN_SEEPROM | MPI_TOOLBOX_CLEAN_BOOTLOADER |
+        MPI_TOOLBOX_CLEAN_FW_BACKUP | MPI_TOOLBOX_CLEAN_OTHER_PERSIST_PAGES |
+        MPI_TOOLBOX_CLEAN_BOOT_SERVICES |
+        MPI_TOOLBOX_CLEAN_PERSIST_MANUFACT_PAGES;
+    uint32_t flags = le32_to_cpu(req->Flags);
+    uint16_t status = MPI_IOCSTATUS_SUCCESS;
+    MPIDefaultReply reply = {
+        .Reserved = { req->Tool, 0 },
+        .MsgLength = sizeof(reply) / 4,
+        .Function = req->Function,
+        .MsgContext = req->MsgContext,
+    };
+
+    /* Clean stored configuration data and empty auxiliary regions. */
+    if (req->Tool != MPI_TOOLBOX_CLEAN_TOOL || req->ChainOffset ||
+        (s->doorbell_state == DOORBELL_WRITE &&
+         s->doorbell_cnt * 4 < sizeof(*req)) || (flags & ~regions)) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+    } else {
+        const unsigned manufacturing =
+            (1 << MPTSAS_CONFIG_MANUFACTURING_1) |
+            (1 << MPTSAS_CONFIG_MANUFACTURING_4);
+        unsigned i;
+        unsigned clear = 0;
+
+        if (flags & MPI_TOOLBOX_CLEAN_PERSIST_MANUFACT_PAGES) {
+            clear |= manufacturing;
+        } else if (flags & MPI_TOOLBOX_CLEAN_SEEPROM) {
+            clear |= 1 << MPTSAS_CONFIG_MANUFACTURING_1;
+        }
+        if (flags & MPI_TOOLBOX_CLEAN_OTHER_PERSIST_PAGES) {
+            clear |= MPTSAS_CONFIG_PAGE_MASK & ~manufacturing;
+        }
+        for (i = 0; i < ARRAY_SIZE(s->config_nvram); i++) {
+            if (clear & (1 << i)) {
+                memset(s->config_nvram[i], 0, sizeof(s->config_nvram[i]));
+                s->config_nvram_written &= ~(1 << i);
+            }
+        }
+    }
+    reply.IOCStatus = cpu_to_le16(status);
+    trace_mptsas_process_toolbox(s, req->Tool, flags, status);
+    mptsas_reply(s, &reply);
+}
+
+static void mptsas_process_sas_control(MPTSASState *s,
+                                     MPIMsgSASIOUnitControl *req)
+{
+    MPIDefaultReply reply = {
+        .Reserved = { req->Operation, 0 },
+        .MsgLength = sizeof(reply) / 4,
+        .Function = req->Function,
+        .MsgContext = req->MsgContext,
+    };
+    uint16_t status = MPI_IOCSTATUS_SUCCESS;
+
+    memcpy(reply.Reserved1, &req->DevHandle, sizeof(reply.Reserved1));
+    if (mptsas_is_spi(s)) {
+        status = MPI_IOCSTATUS_INVALID_FUNCTION;
+    } else if (req->ChainOffset ||
+               (s->doorbell_state == DOORBELL_WRITE &&
+                s->doorbell_cnt * 4 < sizeof(*req))) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+    } else if (req->Operation != MPI_SAS_OP_CLEAR_NOT_PRESENT &&
+               req->Operation != MPI_SAS_OP_CLEAR_ALL_PERSISTENT) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+    }
+    /* The persistent mapping table is empty; target IDs follow the bus. */
+    reply.IOCStatus = cpu_to_le16(status);
+    trace_mptsas_process_sas_control(s, req->Operation, status);
+    mptsas_reply(s, &reply);
+}
+
+static void mptsas_process_sep(MPTSASState *s, MPIMsgSEP *req)
+{
+    MPIMsgSEPReply reply = {
+        .TargetID = req->TargetID,
+        .Bus = req->Bus,
+        .MsgLength = sizeof(reply) / 4,
+        .Function = req->Function,
+        .Action = req->Action,
+        .MsgContext = req->MsgContext,
+        .Slot = req->Slot,
+        .EnclosureHandle = req->EnclosureHandle,
+    };
+    uint16_t status = MPI_IOCSTATUS_SUCCESS;
+    uint32_t indicators = le32_to_cpu(req->SlotStatus);
+    unsigned first = mptsas_first_slot(s);
+    unsigned slot;
+
+    if (mptsas_is_spi(s)) {
+        status = MPI_IOCSTATUS_INVALID_FUNCTION;
+        goto done;
+    }
+    if (req->ChainOffset || req->Flags > MPI_SEP_ENCLOSURE_SLOT_ADDRESS ||
+        req->Action > MPI_SEP_ACTION_READ_STATUS ||
+        (s->doorbell_state == DOORBELL_WRITE &&
+         s->doorbell_cnt * 4 < sizeof(*req))) {
+        status = MPI_IOCSTATUS_INVALID_FIELD;
+        goto done;
+    }
+    if (req->Flags == MPI_SEP_ENCLOSURE_SLOT_ADDRESS) {
+        slot = le16_to_cpu(req->Slot) - first;
+        if (le16_to_cpu(req->EnclosureHandle) != MPTSAS_ENCLOSURE_HANDLE ||
+            slot >= MPTSAS_NUM_PORTS) {
+            status = MPI_IOCSTATUS_INVALID_FIELD;
+            goto done;
+        }
+    } else {
+        slot = req->TargetID;
+        if (req->Bus || slot >= MPTSAS_NUM_PORTS ||
+            !scsi_device_find(&s->bus, 0, slot, 0)) {
+            status = req->Bus ? MPI_IOCSTATUS_SCSI_INVALID_BUS :
+                               MPI_IOCSTATUS_SCSI_INVALID_TARGETID;
+            goto done;
+        }
+    }
+    if (req->Action == MPI_SEP_ACTION_WRITE_STATUS) {
+        if (indicators & ~MPTSAS_ENCLOSURE_INDICATORS) {
+            status = MPI_IOCSTATUS_INVALID_FIELD;
+            goto done;
+        }
+        s->enclosure_status[slot] = indicators;
+    }
+    reply.Slot = cpu_to_le16(slot + first);
+    reply.EnclosureHandle = cpu_to_le16(MPTSAS_ENCLOSURE_HANDLE);
+    reply.SlotStatus = cpu_to_le32(s->enclosure_status[slot]);
+done:
+    reply.IOCStatus = cpu_to_le16(status);
+    mptsas_reply(s, (MPIDefaultReply *)&reply);
+}
+
 static void mptsas_process_message(MPTSASState *s, MPIRequestHeader *req)
 {
+    MPIDefaultReply reply;
+
     trace_mptsas_process_message(s, req->Function, req->MsgContext);
     switch (req->Function) {
     case MPI_FUNCTION_SCSI_TASK_MGMT:
@@ -764,9 +1274,36 @@ static void mptsas_process_message(MPTSASState *s, MPIRequestHeader *req)
         mptsas_process_config(s, (MPIMsgConfig *)req);
         break;
 
+    case MPI_FUNCTION_FW_UPLOAD:
+        mptsas_process_fw_upload(s, (MPIMsgFWUpload *)req);
+        break;
+
+    case MPI_FUNCTION_FW_DOWNLOAD:
+        mptsas_process_fw_download(s, (MPIMsgFWDownload *)req);
+        break;
+
+    case MPI_FUNCTION_TOOLBOX:
+        mptsas_process_toolbox(s, (MPIMsgToolboxClean *)req);
+        break;
+
+    case MPI_FUNCTION_SAS_IO_UNIT_CONTROL:
+        mptsas_process_sas_control(s, (MPIMsgSASIOUnitControl *)req);
+        break;
+
+    case MPI_FUNCTION_SCSI_ENCLOSURE_PROCESSOR:
+        mptsas_process_sep(s, (MPIMsgSEP *)req);
+        break;
+
     default:
-        trace_mptsas_unhandled_cmd(s, req->Function, 0);
-        mptsas_set_fault(s, MPI_IOCSTATUS_INVALID_FUNCTION);
+        trace_mptsas_unhandled_cmd(s, le32_to_cpu(req->MsgContext),
+                                  req->Function);
+        /* An unsupported message fails without faulting the controller. */
+        memset(&reply, 0, sizeof(reply));
+        reply.MsgLength = sizeof(reply) / 4;
+        reply.Function = req->Function;
+        reply.MsgContext = req->MsgContext;
+        reply.IOCStatus = cpu_to_le16(MPI_IOCSTATUS_INVALID_FUNCTION);
+        mptsas_reply(s, &reply);
         break;
     }
 }
@@ -824,6 +1361,9 @@ static void mptsas_soft_reset(MPTSASState *s)
 
     trace_mptsas_reset(s);
 
+    timer_del(s->coalescing_timer);
+    s->coalescing_count = 0;
+    s->reply_irq_ready = false;
     /* Temporarily disable interrupts */
     save_mask = s->intr_mask;
     s->intr_mask = MPI_HIM_DIM | MPI_HIM_RIM;
@@ -839,7 +1379,15 @@ static void mptsas_soft_reset(MPTSASState *s)
     s->reply_post_head = 0;
     s->request_post_tail = 0;
     s->request_post_head = 0;
+    memset(s->enclosure_status, 0, sizeof(s->enclosure_status));
     qemu_bh_cancel(s->request_bh);
+
+    /* Discard an unfinished handshake along with the message FIFOs. */
+    s->doorbell_state = DOORBELL_NONE;
+    s->doorbell_idx = 0;
+    s->doorbell_cnt = 0;
+    s->doorbell_reply_idx = 0;
+    s->doorbell_reply_size = 0;
 
     s->state = MPI_IOC_STATE_READY;
 }
@@ -867,10 +1415,6 @@ static uint32_t mptsas_doorbell_read(MPTSASState *s)
 
         ret |= MPI_DOORBELL_ACTIVE;
         if (s->doorbell_reply_idx < s->doorbell_reply_size) {
-            /* For more information about this endian switch, see the
-             * commit message for commit 36b62ae ("fw_cfg: fix endianness in
-             * fw_cfg_data_mem_read() / _write()", 2015-01-16).
-             */
             ret |= le16_to_cpu(s->doorbell_reply[s->doorbell_reply_idx++]);
         }
         break;
@@ -886,10 +1430,6 @@ static void mptsas_doorbell_write(MPTSASState *s, uint32_t val)
 {
     if (s->doorbell_state == DOORBELL_WRITE) {
         if (s->doorbell_idx < s->doorbell_cnt) {
-            /* For more information about this endian switch, see the
-             * commit message for commit 36b62ae ("fw_cfg: fix endianness in
-             * fw_cfg_data_mem_read() / _write()", 2015-01-16).
-             */
             s->doorbell_msg[s->doorbell_idx++] = cpu_to_le32(val);
             if (s->doorbell_idx == s->doorbell_cnt) {
                 mptsas_process_message(s, (MPIRequestHeader *)s->doorbell_msg);
@@ -900,10 +1440,9 @@ static void mptsas_doorbell_write(MPTSASState *s, uint32_t val)
 
     switch ((val & MPI_DOORBELL_FUNCTION_MASK) >> MPI_DOORBELL_FUNCTION_SHIFT) {
     case MPI_FUNCTION_IOC_MESSAGE_UNIT_RESET:
-        mptsas_soft_reset(s);
-        break;
     case MPI_FUNCTION_IO_UNIT_RESET:
-        /* I/O unit reset is not implemented. */
+        /* Both requests use the model's existing soft-reset path. */
+        mptsas_soft_reset(s);
         break;
     case MPI_FUNCTION_HANDSHAKE:
         s->doorbell_state = DOORBELL_WRITE;
@@ -972,6 +1511,10 @@ static int mptsas_hard_reset(MPTSASState *s)
 {
     mptsas_soft_reset(s);
 
+    memcpy(s->config_current, s->config_nvram,
+           sizeof(s->config_current));
+    s->config_current_written = s->config_nvram_written;
+
     s->who_init = MPI_WHOINIT_NO_ONE;
     s->doorbell_state = DOORBELL_NONE;
     memset(s->doorbell_msg, 0, sizeof(s->doorbell_msg));
@@ -1017,9 +1560,13 @@ static void mptsas_interrupt_status_write(MPTSASState *s)
 
     case DOORBELL_READ:
         assert(s->intr_status & MPI_HIS_DOORBELL_INTERRUPT);
+        /* Acknowledge this word before raising the next doorbell interrupt. */
+        s->intr_status &= ~MPI_HIS_DOORBELL_INTERRUPT;
+        mptsas_update_interrupt(s);
         if (s->doorbell_reply_idx == s->doorbell_reply_size) {
             s->doorbell_state = DOORBELL_NONE;
         }
+        s->intr_status |= MPI_HIS_DOORBELL_INTERRUPT;
         break;
 
     default:
@@ -1037,6 +1584,9 @@ static uint32_t mptsas_reply_post_read(MPTSASState *s)
     } else {
         ret = -1;
         s->intr_status &= ~MPI_HIS_REPLY_MESSAGE_INTERRUPT;
+        timer_del(s->coalescing_timer);
+        s->coalescing_count = 0;
+        s->reply_irq_ready = false;
         mptsas_update_interrupt(s);
     }
 
@@ -1252,7 +1802,7 @@ static void mptsas_command_complete(SCSIRequest *sreq,
         } else {
             reply.SCSIState     = MPI_SCSI_STATE_AUTOSENSE_VALID;
             reply.SenseCount    = sense_len;
-            reply.IOCStatus     = MPI_IOCSTATUS_SCSI_DATA_UNDERRUN;
+            reply.IOCStatus     = MPI_IOCSTATUS_SUCCESS;
         }
 
         mptsas_fix_scsi_io_reply_endianness(&reply);
@@ -1426,10 +1976,12 @@ static void mptsas_scsi_realize(PCIDevice *dev, Error **errp)
                        IEEE_COMPANY_LOCALLY_ASSIGNED) << 36;
         s->sas_addr |= (pci_dev_bus_num(dev) << 16);
         s->sas_addr |= (PCI_SLOT(dev->devfn) << 8);
-        s->sas_addr |= PCI_FUNC(dev->devfn);
+        s->sas_addr |= PCI_FUNC(dev->devfn) * (2 * MPTSAS_NUM_PORTS);
     }
     s->max_devices = mptsas_max_devices(s);
 
+    s->coalescing_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      mptsas_coalescing_expired, s);
     s->request_bh = qemu_bh_new_guarded(mptsas_fetch_requests, s,
                                         &DEVICE(dev)->mem_reentrancy_guard);
 
@@ -1441,6 +1993,9 @@ static void mptsas_scsi_uninit(PCIDevice *dev)
 {
     MPTSASState *s = MPT_SAS(dev);
 
+    g_clear_pointer(&s->fw_image, g_free);
+
+    timer_free(s->coalescing_timer);
     qemu_bh_delete(s->request_bh);
     msi_uninit(dev);
 }
@@ -1450,6 +2005,27 @@ static void mptsas_reset(DeviceState *dev)
     MPTSASState *s = MPT_SAS(dev);
 
     mptsas_hard_reset(s);
+}
+
+static bool mptsas_load_legacy_reply_fifo(uint32_t *fifo, uint16_t *head,
+                                        uint16_t *tail)
+{
+    uint32_t pending[MPTSAS_REPLY_QUEUE_DEPTH_V0];
+    unsigned count = 0;
+
+    if (*head > MPTSAS_REPLY_QUEUE_DEPTH_V0 ||
+        *tail > MPTSAS_REPLY_QUEUE_DEPTH_V0) {
+        return false;
+    }
+    /* Preserve FIFO order when the old ring wraps at a smaller index. */
+    while (*head != *tail) {
+        pending[count++] = fifo[*head];
+        *head = (*head + 1) % (MPTSAS_REPLY_QUEUE_DEPTH_V0 + 1);
+    }
+    memcpy(fifo, pending, count * sizeof(*fifo));
+    *head = 0;
+    *tail = count;
+    return true;
 }
 
 static int mptsas_post_load(void *opaque, int version_id)
@@ -1473,6 +2049,16 @@ static int mptsas_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    if (version_id == 0 &&
+        (!mptsas_load_legacy_reply_fifo(s->reply_post,
+                                        &s->reply_post_head,
+                                        &s->reply_post_tail) ||
+         !mptsas_load_legacy_reply_fifo(s->reply_free,
+                                        &s->reply_free_head,
+                                        &s->reply_free_tail))) {
+        return -EINVAL;
+    }
+
     if (s->doorbell_idx < 0 || s->doorbell_cnt < 0 ||
         s->doorbell_reply_idx < 0 || s->doorbell_reply_size < 0 ||
         s->doorbell_idx > s->doorbell_cnt ||
@@ -1487,7 +2073,11 @@ static int mptsas_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
-    if (s->ioc1_flags & ~(uint32_t)MPI_IOCPAGE1_REPLY_COALESCING) {
+    if ((s->config_nvram_written & ~MPTSAS_CONFIG_PAGE_MASK) ||
+        (s->config_current_written & ~MPTSAS_CONFIG_PAGE_MASK) ||
+        (s->fw_image_size &&
+         !mptsas_fw_image_valid(s->fw_image, s->fw_image_size)) ||
+        (s->ioc1_flags & ~(uint32_t)MPI_IOCPAGE1_REPLY_COALESCING)) {
         return -EINVAL;
     }
 
@@ -1503,12 +2093,11 @@ static int mptsas_post_load(void *opaque, int version_id)
             return -EINVAL;
         }
     } else if (!s->max_devices || s->max_devices > MPTSAS_NUM_PORTS ||
-               s->max_buses > 1 ||
-               s->ioc1_flags || s->ioc1_coalescing_timeout ||
-               s->ioc1_coalescing_depth) {
+               s->max_buses > 1) {
         return -EINVAL;
     }
 
+    mptsas_update_interrupt(s);
     return 0;
 }
 
@@ -1516,7 +2105,18 @@ static int mptsas_pre_load(void *opaque)
 {
     MPTSASState *s = opaque;
 
+    memset(s->enclosure_status, 0, sizeof(s->enclosure_status));
+    g_clear_pointer(&s->fw_image, g_free);
+    s->fw_image_size = 0;
+    memset(s->config_nvram, 0, sizeof(s->config_nvram));
+    s->config_nvram_written = 0;
+    memset(s->config_current, 0, sizeof(s->config_current));
+    s->config_current_written = 0;
     s->variant = UINT8_MAX;
+    timer_del(s->coalescing_timer);
+    s->coalescing_count = 0;
+    s->reply_irq_ready = true; /* Legacy streams interrupt immediately. */
+    s->irq_state = 0;
     s->ioc1_flags = 0;
     s->ioc1_coalescing_timeout = 0;
     s->ioc1_coalescing_depth = 0;
@@ -1536,9 +2136,8 @@ static bool mptsas_ioc1_vmstate_needed(void *opaque)
 {
     MPTSASState *s = opaque;
 
-    return mptsas_is_spi(s) &&
-           (s->ioc1_flags || s->ioc1_coalescing_timeout ||
-            s->ioc1_coalescing_depth);
+    return s->ioc1_flags || s->ioc1_coalescing_timeout ||
+           s->ioc1_coalescing_depth;
 }
 
 static const VMStateDescription vmstate_mptsas_ioc1 = {
@@ -1571,9 +2170,99 @@ static const VMStateDescription vmstate_mptspi_variant = {
     },
 };
 
+static bool mptsas_fw_vmstate_needed(void *opaque)
+{
+    MPTSASState *s = opaque;
+
+    return s->fw_image_size != 0;
+}
+
+static const VMStateDescription vmstate_mptsas_fw = {
+    .name = "mptsas/firmware-image",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mptsas_fw_vmstate_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(fw_image_size, MPTSASState),
+        VMSTATE_VBUFFER_ALLOC_UINT32(fw_image, MPTSASState, 1, NULL,
+                                    fw_image_size),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool mptsas_nvram_vmstate_needed(void *opaque)
+{
+    MPTSASState *s = opaque;
+
+    return s->config_nvram_written || s->config_current_written;
+}
+
+static const VMStateDescription vmstate_mptsas_nvram = {
+    .name = "mptsas/config-pages",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mptsas_nvram_vmstate_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(config_nvram_written, MPTSASState),
+        VMSTATE_UINT8_2DARRAY(config_nvram, MPTSASState,
+                            MPTSAS_CONFIG_PAGE_COUNT,
+                            MPTSAS_CONFIG_PAGE_DATA_SIZE),
+        VMSTATE_UINT8(config_current_written, MPTSASState),
+        VMSTATE_UINT8_2DARRAY(config_current, MPTSASState,
+                            MPTSAS_CONFIG_PAGE_COUNT,
+                            MPTSAS_CONFIG_PAGE_DATA_SIZE),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool mptsas_enclosure_vmstate_needed(void *opaque)
+{
+    MPTSASState *s = opaque;
+    unsigned i;
+
+    for (i = 0; i < MPTSAS_NUM_PORTS; i++) {
+        if (s->enclosure_status[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_mptsas_enclosure = {
+    .name = "mptsas/enclosure",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mptsas_enclosure_vmstate_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(enclosure_status, MPTSASState, MPTSAS_NUM_PORTS),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool mptsas_coalescing_needed(void *opaque)
+{
+    MPTSASState *s = opaque;
+
+    /* Preserve the idle state so the next reply starts a new batch. */
+    return s->coalescing_count != 0 || !s->reply_irq_ready;
+}
+
+static const VMStateDescription vmstate_mptsas_coalescing = {
+    .name = "mptsas/coalescing",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mptsas_coalescing_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(coalescing_timer, MPTSASState),
+        VMSTATE_UINT32(coalescing_count, MPTSASState),
+        VMSTATE_BOOL(reply_irq_ready, MPTSASState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_mptsas = {
     .name = "mptsas",
-    .version_id = 0,
+    .version_id = 1,
     .minimum_version_id = 0,
     .pre_load = mptsas_pre_load,
     .post_load = mptsas_post_load,
@@ -1602,13 +2291,13 @@ static const VMStateDescription vmstate_mptsas = {
         VMSTATE_UINT16(request_post_head, MPTSASState),
         VMSTATE_UINT16(request_post_tail, MPTSASState),
 
-        VMSTATE_UINT32_ARRAY(reply_post, MPTSASState,
-                             MPTSAS_REPLY_QUEUE_DEPTH + 1),
+        VMSTATE_UINT32_SUB_ARRAY(reply_post, MPTSASState, 0,
+                                 MPTSAS_REPLY_QUEUE_DEPTH_V0 + 1),
         VMSTATE_UINT16(reply_post_head, MPTSASState),
         VMSTATE_UINT16(reply_post_tail, MPTSASState),
 
-        VMSTATE_UINT32_ARRAY(reply_free, MPTSASState,
-                             MPTSAS_REPLY_QUEUE_DEPTH + 1),
+        VMSTATE_UINT32_SUB_ARRAY(reply_free, MPTSASState, 0,
+                                 MPTSAS_REPLY_QUEUE_DEPTH_V0 + 1),
         VMSTATE_UINT16(reply_free_head, MPTSASState),
         VMSTATE_UINT16(reply_free_tail, MPTSASState),
 
@@ -1617,9 +2306,23 @@ static const VMStateDescription vmstate_mptsas = {
         VMSTATE_UINT16(reply_frame_size, MPTSASState),
         VMSTATE_UINT64(host_mfa_high_addr, MPTSASState),
         VMSTATE_UINT64(sense_buffer_high_addr, MPTSASState),
+        VMSTATE_SUB_ARRAY(reply_post, MPTSASState,
+                          MPTSAS_REPLY_QUEUE_DEPTH_V0 + 1,
+                          MPTSAS_REPLY_QUEUE_DEPTH -
+                          MPTSAS_REPLY_QUEUE_DEPTH_V0,
+                          1, vmstate_info_uint32, uint32_t),
+        VMSTATE_SUB_ARRAY(reply_free, MPTSASState,
+                          MPTSAS_REPLY_QUEUE_DEPTH_V0 + 1,
+                          MPTSAS_REPLY_QUEUE_DEPTH -
+                          MPTSAS_REPLY_QUEUE_DEPTH_V0,
+                          1, vmstate_info_uint32, uint32_t),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
+        &vmstate_mptsas_coalescing,
+        &vmstate_mptsas_enclosure,
+        &vmstate_mptsas_fw,
+        &vmstate_mptsas_nvram,
         &vmstate_mptsas_ioc1,
         &vmstate_mptspi_variant,
         NULL

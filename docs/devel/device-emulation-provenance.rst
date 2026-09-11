@@ -1,0 +1,75 @@
+.. SPDX-License-Identifier: GPL-2.0-or-later
+
+Device emulation source notice
+==============================
+
+The following public sources are technical references for
+the device models that link to this notice:
+
+* Linux
+  `sound/pci/cs4281.c <https://github.com/torvalds/linux/blob/master/sound/pci/cs4281.c>`__
+  for CS4281 BA0 registers, the four DMA and FIFO channels, serial-slot
+  routing, and sample-rate conversion.
+* Linux
+  `drivers/net/ethernet/broadcom/tg3.h <https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/broadcom/tg3.h>`__
+  and
+  `tg3.c <https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/broadcom/tg3.c>`__
+  for BCM5701/BCM5704 registers, SRAM and mailbox layout, PHY access, DMA
+  descriptors, packet offloads, status blocks, and interrupts.
+* Broadcom's `BCM57XX Programmer's Guide, 57XX-PG105-R
+  <https://datasheet.datasheetarchive.com/originals/library/Datasheets-ZSAA1/DSAZSAA00017932.pdf>`__,
+  pages 232-234 and 325-326, for the MISC_HOST_CTRL byte-swap bit and target
+  byte ordering, and pages 379-380 and 550 for MAC status and NVM command
+  write-one-to-clear fields and link-change acknowledgement.  The illumos
+  `bge_chip2.c
+  <https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/io/bge/bge_chip2.c>`__
+  also documents and programs the byte order for native big-endian MMIO.
+* Intel's `EHCI specification, revision 1.0
+  <https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/ehci-specification-for-usb.pdf>`__,
+  sections 2.2.3, 2.2.5 and 4.2, for companion-controller numbering and port
+  ownership and routing.
+  NEC's `uPD720101 User's Manual, S16336EJ5V0UM
+  <https://www.edbatalha.info/compaq-n610c/uPD720101%20User%20Manual%20S16336EJ5V0UM00.pdf>`__,
+  pages 76-77, specifies the alternating OHCI routing of its five USB ports.
+* Linux
+  `drivers/scsi/qla1280.h <https://github.com/torvalds/linux/blob/master/drivers/scsi/qla1280.h>`__
+  and
+  `qla1280.c <https://github.com/torvalds/linux/blob/master/drivers/scsi/qla1280.c>`__
+  for ISP12160 mailbox, target, queue and autosense controls;
+  `drivers/net/ethernet/intel/e100.c <https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/intel/e100.c>`__
+  for 82550/82559 configuration byte 18 receive CRC and stripping controls.
+* Intel's `8255x 10/100 Mbps Ethernet Controller Family Open Source Software
+  Developer Manual <https://www.intel.com/content/dam/doc/manual/8255x-10-100-mbps-ethernet-controller-software-dev-manual.pdf>`__,
+  section 7.3.11, for the PHY equalizer register's NOP command.  Other
+  equalizer commands are not implemented.
+* NetBSD's `sys/dev/ic/isp.c
+  <https://github.com/NetBSD/src/blob/trunk/sys/dev/ic/isp.c>`__
+  (BSD-2-Clause) for the 32-LUN limit and per-LUN queue parameters of
+  Ultra2/Ultra3 SCSI adapters.
+* Intel's `8254x Family of Gigabit Ethernet Controllers Software Developer's
+  Manual <https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf>`__,
+  sections 3.2.7 and 3.4.3, for receive and transmit interrupt timers.
+* The public PCI ID Repository
+  `pci.ids <https://github.com/pciutils/pciids/blob/master/pci.ids>`__
+  for the HP RMP-3 management-function identities.  Linux
+  `drivers/tty/serial/8250/8250_pci.c <https://github.com/torvalds/linux/blob/master/drivers/tty/serial/8250/8250_pci.c>`__
+  and
+  `include/linux/pci_ids.h <https://github.com/torvalds/linux/blob/master/include/linux/pci_ids.h>`__
+  for the HP Diva RMP3 PCI identifiers and its single 16550 UART in BAR1.
+* FreeBSD
+  `sys/dev/mpt/mpilib/mpi.h <https://github.com/freebsd/freebsd-src/blob/main/sys/dev/mpt/mpilib/mpi.h>`__
+  for the LSI Fusion-MPT interface definitions, and Linux
+  `drivers/message/fusion/mptbase.c <https://github.com/torvalds/linux/blob/master/drivers/message/fusion/mptbase.c>`__
+  for the IOC reset doorbell functions and transition to the READY state.
+
+The IA-64 firmware's PCI controller handles and device paths follow the
+`UEFI 2.11 Device Path Protocol
+<https://uefi.org/specs/UEFI/2.11/10_Protocols_Device_Path_Protocol.html>`__
+and
+`PCI I/O Protocol
+<https://uefi.org/specs/UEFI/2.11/14_Protocols_PCI_Bus_Support.html>`__.
+The public EDK II
+`PciDeviceSupport.c
+<https://github.com/tianocore/edk2/blob/master/MdeModulePkg/Bus/Pci/PciBusDxe/PciDeviceSupport.c>`__
+is an implementation reference for publishing a PCI controller handle with
+both protocols.

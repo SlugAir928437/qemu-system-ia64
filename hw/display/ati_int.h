@@ -50,17 +50,23 @@
 OBJECT_DECLARE_SIMPLE_TYPE(ATIVGAState, ATI_VGA)
 
 #define ATI_PLL_REG_COUNT 64
+#define ATI_SURFACE_COUNT 8
 
 typedef struct ATIVGARegs {
     uint32_t mm_index;
     uint32_t clock_cntl_index;
     uint32_t pll[ATI_PLL_REG_COUNT];
+    uint32_t pll_active[5];
+    /* Incoming migration compatibility; updates are immediate. */
+    bool pll_pending;
     uint32_t bios_scratch[8];
     uint32_t gen_int_cntl;
     uint32_t gen_int_status;
     uint32_t crtc_gen_cntl;
     uint32_t crtc_ext_cntl;
     uint32_t dac_cntl;
+    uint32_t dac_ext_cntl;
+    uint32_t dac_macro_cntl;
     uint32_t gpio_vga_ddc;
     uint32_t gpio_dvi_ddc;
     uint32_t gpio_monid;
@@ -73,6 +79,10 @@ typedef struct ATIVGARegs {
     uint32_t crtc_offset;
     uint32_t crtc_offset_cntl;
     uint32_t crtc_pitch;
+    uint32_t surface_cntl;
+    uint32_t surface_lower[ATI_SURFACE_COUNT];
+    uint32_t surface_upper[ATI_SURFACE_COUNT];
+    uint32_t surface_info[ATI_SURFACE_COUNT];
     uint32_t cur_offset;
     uint32_t cur_hv_pos;
     uint32_t cur_hv_offs;
@@ -91,6 +101,11 @@ typedef struct ATIVGARegs {
     uint32_t dst_x;
     uint32_t dst_y;
     uint32_t dp_gui_master_cntl;
+    uint32_t bres[3];
+    uint32_t trail[4];
+    uint32_t scale[9];
+    uint32_t scale_3d_cntl;
+    uint32_t scale_3d_datatype;
     uint32_t brush_y_x;
     uint32_t brush_data[64];
     uint32_t dp_brush_bkgd_clr;
@@ -152,6 +167,10 @@ typedef struct ATI3DState {
     uint32_t se_cntl_status;
     uint8_t fog_table[ATI_3D_FOG_TABLE_ENTRIES];
     uint8_t fog_table_index;
+    /* CP scaler palette, independent of the display DAC palette. */
+    uint32_t scaler_palette[256];
+    uint8_t scaler_palette_format;
+    bool scaler_palette_valid;
 
     uint32_t cp_rb_base;
     uint32_t cp_rb_cntl;
@@ -232,15 +251,23 @@ struct ATIVGAState {
     bool crtc_fix_vsync_timing;
     uint32_t crtc_offset_active;
     uint32_t crtc_pitch_active;
+    uint8_t crtc_tile_line_active;
     bitbang_i2c_interface bbi2c;
     I2CDDCState i2cddc;
     uint64_t linear_aper_sz;
     MemoryRegion linear_aper;
+    MemoryRegion surface_aper;
     MemoryRegion io;
     MemoryRegion mm;
     ATIVGARegs regs;
     ATIHostDataState host_data;
+    /* Host-only staging storage; nested commands use their own allocation. */
+    uint8_t *blt_row_buffer;
+    size_t blt_row_buffer_size;
+    bool blt_row_buffer_busy;
     ATI3DState r100_3d;
+    uint64_t r100_state_generation;
+    bool default_rom;
 };
 
 static inline bool ati_is_rv100_family(const ATIVGAState *s)
@@ -256,7 +283,17 @@ static inline bool ati_has_rv100_3d(const ATIVGAState *s)
 
 const char *ati_reg_name(int num);
 
+bool ati_2d_tile_offset(const ATIVGAState *s, uint32_t base, uint32_t pitch,
+                         unsigned int cpp, unsigned int tile,
+                         uint32_t xbyte, uint32_t y, uint64_t *offset);
+bool ati_2d_reg_read(ATIVGAState *s, hwaddr addr, uint64_t *value,
+                     unsigned int size);
+bool ati_2d_reg_write(ATIVGAState *s, hwaddr addr, uint64_t value,
+                      unsigned int size);
+void ati_2d_complete(ATIVGAState *s);
 void ati_2d_blt(ATIVGAState *s);
+void ati_2d_polyline(ATIVGAState *s, const uint32_t *points,
+                     unsigned int count);
 bool ati_host_data_write(ATIVGAState *s, uint32_t data, bool last);
 void ati_host_data_finish(ATIVGAState *s);
 bool ati_3d_read(ATIVGAState *s, hwaddr addr, uint64_t *data,

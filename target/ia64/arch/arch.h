@@ -57,6 +57,13 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                     uint32_t alignment_info);
 uint64_t ia64_mmu_speculative_int_probe(CPUIA64State *env, uint64_t va,
                                         uint32_t size);
+/* PA is UINT64_MAX unless the complete datum has a qualified RAM mapping. */
+uint64_t ia64_mmu_speculative_int_probe_pa(CPUIA64State *env, uint64_t va,
+                                           uint32_t size, uint64_t *pa);
+uint64_t ia64_mmu_speculative_probe_pa(CPUIA64State *env, uint64_t va,
+                                       uint32_t is_write, uint32_t is_ifetch,
+                                       uint32_t debug_size,
+                                       uint32_t alignment_info, uint64_t *pa);
 uint64_t ia64_mmu_advanced_load_allowed(CPUIA64State *env, uint64_t va);
 uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va);
 uint64_t ia64_mmu_thash(CPUIA64State *env, uint64_t va);
@@ -139,6 +146,11 @@ void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat);
 void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr);
 
 uint64_t ia64_rse_current_cfm(const CPUIA64State *env);
+void ia64_rse_save_context(CPUIA64State *env,
+                           IA64RSEContextState *state);
+void ia64_rse_restore_context(CPUIA64State *env,
+                              const IA64RSEContextState *state);
+void ia64_rse_return_from_min_state(CPUIA64State *env, uint64_t cfm);
 uint32_t ia64_rse_nat_words_grow(uint64_t addr, uint32_t nregs);
 uint64_t ia64_rse_read_rnat(const CPUIA64State *env);
 uint64_t ia64_rse_read_rnat_defined(const CPUIA64State *env);
@@ -191,6 +203,9 @@ void ia64_alat_set(CPUIA64State *env, uint32_t reg, uint64_t addr,
                    uint32_t size, uint64_t generation);
 void ia64_alat_set_fp(CPUIA64State *env, uint32_t reg, uint64_t addr,
                       uint32_t size, uint64_t generation);
+void ia64_alat_set_pa(CPUIA64State *env, uint32_t reg, uint64_t addr,
+                       uint32_t size, uint64_t generation, uint64_t pa,
+                       bool fp);
 void ia64_alat_invalidate_reg(CPUIA64State *env, uint32_t reg);
 void ia64_alat_invalidate_fp_reg(CPUIA64State *env, uint32_t reg);
 uint64_t ia64_alat_check_load(CPUIA64State *env, uint32_t reg,

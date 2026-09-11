@@ -3971,8 +3971,7 @@ test_fp_approx_unsupported_masked_invalid = require_registers(
         # Positive pseudo-infinity: special exponent with integer bit clear.
         (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
         (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
-        # As a numerator this used to bypass the invalid operation and return
-        # a reciprocal approximation.  frsqrta computed a QNaN but left p7=1.
+        # Unsupported operands produce QNaN and clear the result predicate.
         (0x40, 0x0d, nop_m(), frcpa(8, 6, 6, 1, sf=0), nop_i()),
         (0x50, 0x0d, nop_m(), frsqrta(9, 7, 6, sf=0), nop_i()),
         (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
@@ -5454,15 +5453,12 @@ test_frcpa_setf_sig_high_integer_remainder = require_registers(
 
 test_umodsi3_hash_remainder = require_registers(
     "umodsi3_hash_remainder", [
-        # Arithmetic core of an IA-64 __umodsi3 implementation, using an
-        # operand pair observed in a guest hash-table bucket lookup.
+        # Compute an unsigned remainder using reciprocal refinement.
         (0x10, *movl_mlx(22, 0xc3369a5a)),
         (0x20, *movl_mlx(23, 17)),
         (0x30, 0x00, addl(2, 65501, 0), nop_i(), nop_i()),
         (0x40, 0x09, setf_sig(13, 22), setf_sig(9, 23), nop_i()),
-        # Leave SoftFloat in single precision before fcvt.xf, as the guest
-        # process did.  fcvt.xf is architecturally exact and must not inherit
-        # the precision of the preceding status-field-controlled operation.
+        # fcvt.xf must remain exact after a single-precision operation.
         (0x50, 0x0d, nop_m(), fma_s1(6, 1, 1, 0), nop_i()),
         (0x60, 0x0d, sub_reg(23, 0, 23), fcvt_xf(8, 13), nop_i()),
         (0x70, 0x0d, nop_m(), fcvt_xf(9, 9), nop_i()),
@@ -5929,6 +5925,38 @@ test_disabled_fp_mixed_sets_reports_both = require_registers(
         "r9": 3 | (1 << IA64_ISR_EI_SHIFT),
     }, entry=0x10)
 
+test_disabled_fp_skipped_check_not_reused = require_registers(
+    "disabled_fp_skipped_check_not_reused", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, 0x01, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x01, setf_sig(40, 2, qp=1), nop_i(), nop_i()),
+        (0x40, 0x01, setf_sig(41, 2), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x01, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x01,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {"ip": IA64_DISABLED_FP_VECTOR + 0x20, "r8": 0x40, "r9": IA64_ISR_NI | 2,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+
+test_disabled_fp_psr_change_in_bundle = require_registers(
+    "disabled_fp_psr_change_in_bundle", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFH)),
+        (0x20, 0x01, setf_sig(40, 2), nop_i(), nop_i()),
+        (0x30, 0x0d, mov_gr_psr_full(2), fmov(41, 40), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x01, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x01,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {"ip": IA64_DISABLED_FP_VECTOR + 0x20, "r8": 0x30,
+        "r9": IA64_ISR_NI | 2 | (1 << IA64_ISR_EI_SHIFT),
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+
 test_fp_writes_set_psr_mfl_mfh = require_registers(
     "fp_writes_set_psr_mfl_mfh", [
         (0x10, *movl_mlx(2, 0x1234)),
@@ -6142,6 +6170,8 @@ CASE_NAMES = (
     'data_big_endian_ldfe_stfe',
     'data_big_endian_stf_spill_ldf_fill',
     'disabled_fp_high_fault',
+    'disabled_fp_skipped_check_not_reused',
+    'disabled_fp_psr_change_in_bundle',
     'disabled_fp_load_sets_isr_r',
     'disabled_fp_low_fault',
     'disabled_fp_mixed_sets_reports_both',
