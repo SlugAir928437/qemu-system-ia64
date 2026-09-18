@@ -5,6 +5,7 @@
 
 import os
 from pathlib import Path
+from subprocess import run
 
 from qemu_test import QemuSystemTest, wait_for_console_pattern
 
@@ -15,7 +16,7 @@ from ia64.protocol import wait_for_suite
 
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
-    "root-device-path", "console-output",
+    "root-device-path", "console-output", "console-variables",
 }
 
 GRAPHICS_CASES = {
@@ -33,8 +34,8 @@ INPUT_CASES = {
 LOADER_CASES = {
     "image-placement", "low-memory-map", "runtime-map",
     "firmware-aperture", "sal-entrypoint", "sal-memory-descriptors",
-    "sal-call", "direct-alias", "automatic-allocation",
-    "address-allocation", "acpi-topology",
+    "sal-call", "sal-chipset-config", "direct-alias", "automatic-allocation",
+    "address-allocation", "acpi-topology", "acpi-console",
 }
 
 PCI_ROOT_CASES = {
@@ -42,7 +43,7 @@ PCI_ROOT_CASES = {
     "host-enumeration",
 }
 
-RUNTIME_CASES = {"get-time", "set-time", "fadt-reset"}
+RUNTIME_CASES = {"boot-variables", "get-time", "set-time", "fadt-reset"}
 
 SMP_MERCED_CASES = {
     "sal-ap-wake", "merced-rendezvous", "merced-rendezvous-return",
@@ -133,6 +134,15 @@ class HPI2000Boot(QemuSystemTest):
 
     def test_default_optical_boot(self):
         self.require_accelerator("tcg")
+        trace_help = run([self.qemu_bin, "-d", "trace:help"],
+                         capture_output=True, encoding="utf8")
+        if (trace_help.returncode == 1 and
+                trace_help.stdout.startswith("Log items (comma separated):")):
+            self.skipTest("requires the log tracing backend")
+        trace_help.check_returncode()
+        if "ide_atapi_cmd_read" not in trace_help.stdout.splitlines():
+            self.skipTest("requires the ide_atapi_cmd_read trace event")
+
         disk = self.media_path("blank-scsi.img")
         optical = self.media_path("optical.iso")
         trace = Path(self.scratch_file("ide.trace"))
@@ -152,7 +162,8 @@ class HPI2000Boot(QemuSystemTest):
             "-drive", f"file={disk},format=raw",
             "-drive",
             f"file={optical},format=raw,media=cdrom,readonly=on",
-            "-trace", f"enable=ide_atapi_cmd_read,file={trace}",
+            "-d", "trace:ide_atapi_cmd_read",
+            "-D", str(trace),
         )
         vm.launch()
 

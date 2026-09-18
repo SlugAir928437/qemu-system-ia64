@@ -33,6 +33,8 @@ void lpc47b27_config_reset(LPC47B27ConfigState *state)
     assert(state);
 
     *state = (LPC47B27ConfigState) { 0 };
+    state->parallel_dma = 4;
+    state->parallel_mode = 0x3c;
 }
 
 static uint8_t lpc47b27_config_data_read(
@@ -49,6 +51,25 @@ static uint8_t lpc47b27_config_data_read(
     }
 
     switch (state->ldn) {
+    case LPC47B27_CONFIG_LDN_PARALLEL:
+        switch (state->index) {
+        case LPC47B27_CONFIG_CR_ACTIVATE:
+            return state->parallel_activate;
+        case LPC47B27_CONFIG_CR_BASE_MSB:
+            return state->parallel_base_msb;
+        case LPC47B27_CONFIG_CR_BASE_LSB:
+            return state->parallel_base_lsb;
+        case LPC47B27_CONFIG_CR_PRIMARY_IRQ:
+            return state->parallel_irq;
+        case LPC47B27_CONFIG_CR_DMA:
+            return state->parallel_dma;
+        case LPC47B27_CONFIG_CR_MODE:
+            return state->parallel_mode;
+        case LPC47B27_CONFIG_CR_MODE2:
+            return state->parallel_mode2;
+        default:
+            return 0;
+        }
     case LPC47B27_CONFIG_LDN_SERIAL1:
         switch (state->index) {
         case LPC47B27_CONFIG_CR_ACTIVATE:
@@ -111,6 +132,32 @@ static LPC47B27ConfigChange lpc47b27_config_data_write(
     }
 
     switch (state->ldn) {
+    case LPC47B27_CONFIG_LDN_PARALLEL:
+        switch (state->index) {
+        case LPC47B27_CONFIG_CR_ACTIVATE:
+            return lpc47b27_update(&state->parallel_activate, value, 1,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_BASE_MSB:
+            return lpc47b27_update(&state->parallel_base_msb, value, 0x0f,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_BASE_LSB:
+            return lpc47b27_update(&state->parallel_base_lsb, value, 0xfc,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_PRIMARY_IRQ:
+            return lpc47b27_update(&state->parallel_irq, value, 0x0f,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_DMA:
+            return lpc47b27_update(&state->parallel_dma, value, 7,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_MODE:
+            return lpc47b27_update(&state->parallel_mode, value, 0xff,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        case LPC47B27_CONFIG_CR_MODE2:
+            return lpc47b27_update(&state->parallel_mode2, value, 3,
+                                  LPC47B27_CONFIG_CHANGE_PARALLEL);
+        default:
+            return LPC47B27_CONFIG_CHANGE_NONE;
+        }
     case LPC47B27_CONFIG_LDN_SERIAL1:
         switch (state->index) {
         case LPC47B27_CONFIG_CR_ACTIVATE:

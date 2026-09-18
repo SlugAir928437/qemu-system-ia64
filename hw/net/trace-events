@@ -446,6 +446,7 @@ i82596_ioport_write(uint32_t addr, uint32_t val) "IO write addr=0x%08x val=0x%08
 # eepro100.c
 eepro100_io_read(uint32_t addr, unsigned size, uint64_t value) "addr=0x%02x size=%u value=0x%" PRIx64
 eepro100_io_write(uint32_t addr, unsigned size, uint64_t value) "addr=0x%02x size=%u value=0x%" PRIx64
+eepro100_receive(uint32_t rfd_addr, uint16_t command, uint32_t rbd_addr, uint16_t rfd_size, size_t size, uint16_t status, uint8_t config18) "RFD @0x%08x command=0x%04x RBD=0x%08x capacity=%u size=%zu status=0x%04x config18=0x%02x"
 eepro100_cu_cb_dma(int64_t vtime_ns, uint32_t cb_addr, uint16_t cb_status, uint16_t cb_command, uint32_t cb_link, uint16_t completion_status, uint32_t read_result, uint32_t write_result, uint16_t readback, uint32_t readback_result) "vtime=%" PRId64 " CB @0x%08x: status=0x%04x command=0x%04x link=0x%08x completion=0x%04x DMA read=0x%x write=0x%x readback=0x%04x readback-read=0x%x"
 eepro100_scb_intmask(int64_t vtime_ns, uint8_t value, uint8_t scb_status, uint8_t causes, bool intx_before, bool intx_after) "vtime=%" PRId64 " value=0x%02x SCB status=0x%02x causes=0x%02x INTx %d->%d"
 

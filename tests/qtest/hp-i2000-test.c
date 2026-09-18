@@ -2253,15 +2253,18 @@ static void test_hp_i2000_chipset_routing_registers(void)
 {
     QTestState *qts = hp_i2000_start("2G");
     const unsigned int bootstrap = PCI_DEVFN(0x10, 0);
-    const unsigned int wxb = PCI_DEVFN(0x12, 1);
+    const unsigned int wxb = PCI_DEVFN(0x12, 0);
     const unsigned int ihpc = PCI_DEVFN(0x0f, 0);
     uint32_t devnpres;
 
     g_assert_cmphex(hp_i2000_config_readb(
                         qts, 0, bootstrap, INTEL_460GX_SAC_CBN_OFFSET),
                     ==, HP_I2000_CHIPSET_BUS);
+    g_assert_cmphex(hp_i2000_config_readb(qts, 0, bootstrap, 0x44), ==, 1);
+    hp_i2000_config_writeb(qts, 0, bootstrap, 0x44, 0xff);
+    g_assert_cmphex(hp_i2000_config_readb(qts, 0, bootstrap, 0x44), ==, 1);
     devnpres = hp_i2000_config_readl(
-        qts, 0, bootstrap, INTEL_460GX_SAC_DEVNPRES_OFFSET);
+        qts, HP_I2000_CHIPSET_BUS, PCI_DEVFN(0, 0), 0x70);
     g_assert_cmphex(devnpres & MAKE_64BIT_MASK(0x10, 8),
                     ==, BIT(0x11) | BIT(0x15) |
                         BIT(0x16) | BIT(0x17));
@@ -2303,15 +2306,15 @@ static void test_hp_i2000_chipset_routing_registers(void)
                     ==, 0x8086);
 
     g_assert_cmphex(hp_i2000_config_readw(
-                        qts, 5, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                        qts, 5, wxb, 0x48),
                     ==, 0x0101);
     hp_i2000_config_writew(qts, 5, wxb,
-                           INTEL_460GX_XXB_BUSNO_OFFSET, 0x0006);
+                           INTEL_460GX_SAC_BUSNO_OFFSET, 0x0006);
     g_assert_cmphex(hp_i2000_config_readw(
-                        qts, 5, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                        qts, 5, wxb, INTEL_460GX_SAC_BUSNO_OFFSET),
                     ==, 0x0101);
     hp_i2000_config_writew(qts, 5, wxb,
-                           INTEL_460GX_XXB_BUSNO_OFFSET, 0x0606);
+                           INTEL_460GX_SAC_BUSNO_OFFSET, 0x0606);
     g_assert_cmphex(hp_i2000_config_readl(
                         qts, 1, ihpc, PCI_VENDOR_ID),
                     ==, UINT32_MAX);
@@ -2324,7 +2327,7 @@ static void test_hp_i2000_chipset_routing_registers(void)
                         qts, 0, bootstrap, INTEL_460GX_SAC_CBN_OFFSET),
                     ==, HP_I2000_CHIPSET_BUS);
     g_assert_cmphex(hp_i2000_config_readw(
-                        qts, 4, wxb, INTEL_460GX_XXB_BUSNO_OFFSET),
+                        qts, 4, wxb, INTEL_460GX_SAC_BUSNO_OFFSET),
                     ==, 0x0101);
     g_assert_cmphex(hp_i2000_config_readw(
                         qts, 1, ihpc, PCI_VENDOR_ID),
@@ -2791,6 +2794,347 @@ static void test_hp_i2000_i8042_reset(void)
     data = qdict_get_qdict(event, "data");
     g_assert_true(qdict_get_bool(data, "guest"));
     g_assert_cmpstr(qdict_get_str(data, "reason"), ==, "guest-reset");
+    qtest_quit(qts);
+}
+
+static void hp_i2000_keyboard_command(QTestState *qts, uint8_t command)
+{
+    hp_i2000_outb(qts, 0x60, command);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x64) & 1, ==, 1);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x60), ==, 0xfa);
+}
+
+static void hp_i2000_keyboard_init(QTestState *qts)
+{
+    hp_i2000_activate_i8042(qts);
+    hp_i2000_outb(qts, 0x64, 0x60);
+    hp_i2000_outb(qts, 0x60, 1);
+    hp_i2000_keyboard_command(qts, 0xf0);
+    hp_i2000_keyboard_command(qts, 3);
+}
+
+static void hp_i2000_keyboard_event(QTestState *qts, const char *key,
+                                   bool down, const char *expected)
+{
+    qtest_qmp_assert_success(qts,
+        "{'execute':'input-send-event','arguments':{'events':"
+        "[{'type':'key','data':{'down':%i,'key':"
+        "{'type':'qcode','data':%s}}}]}}", down, key);
+    for (; *expected; expected++) {
+        g_assert_cmphex(hp_i2000_inb(qts, 0x64) & 1, ==, 1);
+        g_assert_cmphex(hp_i2000_inb(qts, 0x60), ==, (uint8_t)*expected);
+    }
+    g_assert_cmphex(hp_i2000_inb(qts, 0x64) & 1, ==, 0);
+}
+
+static void test_hp_i2000_keyboard_defaults(void)
+{
+    static const struct {
+        const char *key;
+        uint8_t code;
+        bool typematic;
+        bool release;
+    } keys[] = {
+        { "a",         0x1c, true,  false },
+        { "ret",       0x5a, true,  false },
+        { "tab",       0x0d, true,  false },
+        { "less",      0x13, true,  false },
+        { "backslash", 0x5c, true,  false },
+        { "up",        0x63, true,  false },
+        { "kp_add",    0x7c, true,  false },
+        { "shift",     0x12, false, true  },
+        { "shift_r",   0x59, false, true  },
+        { "ctrl",      0x11, false, true  },
+        { "alt",       0x19, false, true  },
+        { "caps_lock", 0x14, false, true  },
+        { "ctrl_r",    0x58, false, false },
+        { "alt_r",     0x39, false, false },
+        { "esc",       0x08, false, false },
+        { "f1",        0x07, false, false },
+        { "f12",       0x5e, false, false },
+        { "kp_0",      0x70, false, false },
+        { "home",      0x6e, false, false },
+        { "end",       0x65, false, false },
+        { "pause",     0x62, false, false },
+        { "meta_l",    0x8b, true,  true  },
+    };
+    static const uint8_t resets[] = { 0, 0xf5, 0xf6, 0xff };
+    QTestState *qts = hp_i2000_start("2G");
+
+    hp_i2000_keyboard_init(qts);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    for (unsigned r = 0; r < ARRAY_SIZE(resets); r++) {
+        if (resets[r]) {
+            hp_i2000_keyboard_command(qts, 0xfa);
+            hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+            hp_i2000_keyboard_command(qts, resets[r]);
+            if (resets[r] == 0xff) {
+                g_assert_cmphex(hp_i2000_inb(qts, 0x60), ==, 0xaa);
+            }
+            hp_i2000_keyboard_command(qts, 0xf4);
+            hp_i2000_keyboard_command(qts, 0xf0);
+            hp_i2000_keyboard_command(qts, 3);
+        }
+        for (unsigned i = 0; i < ARRAY_SIZE(keys); i++) {
+            char make[] = { keys[i].code, 0 };
+            char release[] = { 0xf0, keys[i].code, 0 };
+
+            hp_i2000_keyboard_event(qts, keys[i].key, true, make);
+            hp_i2000_keyboard_event(qts, keys[i].key, true,
+                                    keys[i].typematic ? make : "");
+            hp_i2000_keyboard_event(qts, keys[i].key, false,
+                                    keys[i].release ? release : "");
+            hp_i2000_keyboard_event(qts, keys[i].key, true, make);
+            hp_i2000_keyboard_event(qts, keys[i].key, false,
+                                    keys[i].release ? release : "");
+        }
+    }
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_keyboard_invalid_key(void)
+{
+    static const uint8_t commands[] = { 0xfb, 0xfc, 0xfd };
+    static const uint8_t invalid[] = {
+        0, 1, 6, 0x68, 0xaa, 0xab, 0xec, 0xef, 0xf1,
+    };
+    QTestState *qts = hp_i2000_start("2G");
+
+    hp_i2000_keyboard_init(qts);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    for (unsigned i = 0; i < ARRAY_SIZE(commands); i++) {
+        hp_i2000_keyboard_command(qts, 0xfa);
+        hp_i2000_keyboard_command(qts, commands[i]);
+        for (unsigned j = 0; j < ARRAY_SIZE(invalid); j++) {
+            hp_i2000_outb(qts, 0x60, invalid[j]);
+            g_assert_cmphex(hp_i2000_inb(qts, 0x64) & 1, ==, 1);
+            g_assert_cmphex(hp_i2000_inb(qts, 0x60), ==, 0xfe);
+            g_assert_cmphex(hp_i2000_inb(qts, 0x64) & 1, ==, 0);
+        }
+        hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+        hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+        hp_i2000_keyboard_event(qts, "a", false, "\xf0\x1c");
+
+        /* A valid retry and subsequent keys still belong to this command. */
+        hp_i2000_keyboard_command(qts, 0x1c);
+        hp_i2000_keyboard_command(qts, 0x53);
+        hp_i2000_keyboard_command(qts, 0x77);
+        hp_i2000_keyboard_command(qts, 0x84);
+        hp_i2000_keyboard_command(qts, 0x8b);
+        hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+        hp_i2000_keyboard_event(qts, "a", true,
+                                commands[i] == 0xfb ? "\x1c" : "");
+        hp_i2000_keyboard_event(qts, "a", false,
+                                commands[i] == 0xfc ? "\xf0\x1c" : "");
+        hp_i2000_keyboard_event(qts, "meta_l", true, "\x8b");
+        hp_i2000_keyboard_event(qts, "meta_l", true,
+                                commands[i] == 0xfb ? "\x8b" : "");
+        hp_i2000_keyboard_event(qts, "meta_l", false,
+                                commands[i] == 0xfc ? "\xf0\x8b" : "");
+    }
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_keyboard_key_types(void)
+{
+    static const struct {
+        uint8_t command;
+        bool per_key;
+        bool typematic;
+        bool release;
+    } modes[] = {
+        { 0xfd, true, false, false },
+        { 0xfc, true, false, true },
+        { 0xfb, true, true, false },
+        { 0xf9, false, false, false },
+        { 0xf8, false, false, true },
+        { 0xf7, false, true, false },
+        { 0xfa, false, true, true },
+    };
+    QTestState *qts = hp_i2000_start("2G");
+
+    hp_i2000_keyboard_init(qts);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    for (unsigned i = 0; i < ARRAY_SIZE(modes); i++) {
+        hp_i2000_keyboard_command(qts, 0xfa);
+        hp_i2000_keyboard_command(qts, modes[i].command);
+        if (modes[i].per_key) {
+            hp_i2000_keyboard_command(qts, 0x1c);
+        }
+        hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+        hp_i2000_keyboard_event(qts, "a", true,
+                                modes[i].typematic ? "\x1c" : "");
+        hp_i2000_keyboard_event(qts, "a", false,
+                                modes[i].release ? "\xf0\x1c" : "");
+        hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+        hp_i2000_keyboard_event(qts, "a", false,
+                                modes[i].release ? "\xf0\x1c" : "");
+        if (modes[i].per_key) {
+            hp_i2000_keyboard_event(qts, "b", true, "\x32");
+            hp_i2000_keyboard_event(qts, "b", true, "\x32");
+            hp_i2000_keyboard_event(qts, "b", false, "\xf0\x32");
+        }
+    }
+
+    /* Set 3 key types can be programmed in set 2 without affecting it. */
+    hp_i2000_keyboard_command(qts, 0xf0);
+    hp_i2000_keyboard_command(qts, 2);
+    hp_i2000_keyboard_command(qts, 0xfd);
+    hp_i2000_keyboard_command(qts, 0x1c);
+    hp_i2000_keyboard_command(qts, 0x32);
+    hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+    hp_i2000_keyboard_event(qts, "a", false, "\xf0\x1c");
+    hp_i2000_keyboard_command(qts, 0xf0);
+    hp_i2000_keyboard_command(qts, 3);
+    hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+    hp_i2000_keyboard_event(qts, "a", false, "");
+    hp_i2000_keyboard_event(qts, "b", true, "\x32");
+    hp_i2000_keyboard_event(qts, "b", false, "");
+
+    hp_i2000_keyboard_command(qts, 0xfd);
+    hp_i2000_keyboard_command(qts, 0x12);
+    hp_i2000_keyboard_command(qts, 0xf6);
+    hp_i2000_keyboard_command(qts, 0xf0);
+    hp_i2000_keyboard_command(qts, 3);
+    hp_i2000_keyboard_event(qts, "shift", true, "\x12");
+    hp_i2000_keyboard_event(qts, "shift", false, "\xf0\x12");
+    qtest_quit(qts);
+}
+
+static void hp_i2000_parallel_config(QTestState *qts, uint8_t reg,
+                                     uint8_t value)
+{
+    hp_i2000_outb(qts, 0x2e, 0x55);
+    hp_i2000_outb(qts, 0x2e, 0x07);
+    hp_i2000_outb(qts, 0x2f, 0x03);
+    hp_i2000_outb(qts, 0x2e, reg);
+    hp_i2000_outb(qts, 0x2f, value);
+    hp_i2000_outb(qts, 0x2e, 0xaa);
+}
+
+static void hp_i2000_parallel_init(QTestState *qts)
+{
+    hp_i2000_parallel_config(qts, 0x60, 0x03);
+    hp_i2000_parallel_config(qts, 0x61, 0x78);
+    hp_i2000_parallel_config(qts, 0x70, 7);
+    hp_i2000_parallel_config(qts, 0xf0, 0x3a);
+    hp_i2000_parallel_config(qts, 0x30, 1);
+}
+
+static void test_hp_i2000_parallel_fifo(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    uint8_t disabled = hp_i2000_inb(qts, 0x77a);
+    unsigned i;
+
+    hp_i2000_parallel_init(qts);
+    hp_i2000_outb(qts, 0x378, 0xa5);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x378), ==, 0xa5);
+    hp_i2000_outb(qts, 0x77a, 0x34);
+    hp_i2000_outb(qts, 0x37a, 0xff);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x37a), ==, 0x3f);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x378), ==, 0xff);
+    hp_i2000_outb(qts, 0x77a, 0xd4);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, 0xd5);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 2, ==, 0);
+        hp_i2000_outb(qts, 0x778, 0x40 + i);
+    }
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, 0xd6);
+    hp_i2000_outb(qts, 0x778, 0xee);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, 0x40 + i);
+    }
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, 0xd5);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, 0x4f);
+
+    hp_i2000_outb(qts, 0x778, 0x5a);
+    hp_i2000_parallel_config(qts, 0x61, 0xbc);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, disabled);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x7bc), ==, 0x5a);
+    hp_i2000_outb(qts, 0x7bc, 0xa5);
+    hp_i2000_outb(qts, 0x7be, 0x34);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x7be), ==, 0x35);
+    hp_i2000_outb(qts, 0x7be, 0xf4);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x7bc), ==, 0x10);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x7bd), ==, 0x08);
+    hp_i2000_parallel_config(qts, 0x30, 0);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x7be), ==, disabled);
+    qtest_system_reset(qts);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, disabled);
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_parallel_irq(void)
+{
+    QTestState *qts = hp_i2000_start("2G");
+    unsigned i;
+
+    hp_i2000_parallel_init(qts);
+    hp_i2000_pid_write(qts, hp_i2000_pid_rte_low(7), 0x57);
+    hp_i2000_outb(qts, 0x77a, 0x34);
+    hp_i2000_outb(qts, 0x37a, 0x20);
+    hp_i2000_outb(qts, 0x77a, 0xd0);
+    for (i = 0; i < 7; i++) {
+        hp_i2000_outb(qts, 0x778, i);
+        g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==, 0);
+    }
+    g_assert_false(hp_i2000_sapic_irr_has_vector(qts, 0x57));
+    hp_i2000_outb(qts, 0x778, 7);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==, 4);
+    g_assert_true(hp_i2000_sapic_irr_wait_for_vector(qts, 0x57));
+
+    hp_i2000_parallel_config(qts, 0x70, 5);
+    hp_i2000_pid_write(qts, hp_i2000_pid_rte_low(5), 0x55);
+    hp_i2000_outb(qts, 0x77a, 0x34);
+    hp_i2000_outb(qts, 0x37a, 0);
+    hp_i2000_outb(qts, 0x77a, 0xd4);
+    for (i = 0; i < 16; i++) {
+        hp_i2000_outb(qts, 0x778, i);
+    }
+    hp_i2000_outb(qts, 0x77a, 0xd0);
+    for (i = 0; i < 7; i++) {
+        g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, i);
+        g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==, 0);
+    }
+    hp_i2000_inb(qts, 0x778);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==, 4);
+    g_assert_true(hp_i2000_sapic_irr_wait_for_vector(qts, 0x55));
+    qtest_quit(qts);
+}
+
+static void test_hp_i2000_parallel_thresholds(void)
+{
+    static const unsigned service_bytes[] = {
+        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1,
+    };
+    QTestState *qts = hp_i2000_start("2G");
+
+    hp_i2000_parallel_init(qts);
+    for (unsigned setting = 0; setting < ARRAY_SIZE(service_bytes); setting++) {
+        hp_i2000_parallel_config(qts, 0xf0, (setting << 3) | 2);
+        for (unsigned reverse = 0; reverse < 2; reverse++) {
+            hp_i2000_outb(qts, 0x77a, 0x34);
+            hp_i2000_outb(qts, 0x37a, reverse ? 0x20 : 0);
+            hp_i2000_outb(qts, 0x77a, 0xd4);
+            if (!reverse) {
+                for (unsigned i = 0; i < 16; i++) {
+                    hp_i2000_outb(qts, 0x778, i);
+                }
+            }
+            hp_i2000_outb(qts, 0x77a, 0xd0);
+            g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==, 0);
+            for (unsigned n = 1; n <= service_bytes[setting]; n++) {
+                if (reverse) {
+                    hp_i2000_outb(qts, 0x778, n);
+                } else {
+                    g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, n - 1);
+                }
+                g_assert_cmphex(hp_i2000_inb(qts, 0x77a) & 4, ==,
+                                n == service_bytes[setting] ? 4 : 0);
+            }
+        }
+    }
     qtest_quit(qts);
 }
 
@@ -4566,7 +4910,21 @@ static void test_hp_i2000_migration(void)
     memset(last_marker, 0x5a, sizeof(last_marker));
 
     qts = hp_i2000_start_with_options("-vga ati");
+    hp_i2000_keyboard_init(qts);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    hp_i2000_keyboard_command(qts, 0xfd);
+    hp_i2000_keyboard_command(qts, 0x1c);
+    hp_i2000_keyboard_command(qts, 0xfc);
+    hp_i2000_keyboard_command(qts, 0x32);
+    hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+    hp_i2000_keyboard_event(qts, "b", true, "\x32");
+    hp_i2000_keyboard_command(qts, 0xfd);
+    qtest_qmp_assert_success(qts, "{'execute':'stop'}");
     qtest_writeb(qts, HP_I2000_CF8_PA + 1, 0x5a);
+    hp_i2000_parallel_init(qts);
+    hp_i2000_outb(qts, 0x77a, 0xd4);
+    hp_i2000_outb(qts, 0x778, 0x5a);
+    hp_i2000_outb(qts, 0x778, 0xa5);
     qtest_writew(qts, HP_I2000_CF8_PA + 2, 0xa55a);
     qtest_writeq(qts, IA64_I2000_PROFILE_NVRAM_BASE + 0x80,
                  UINT64_C(0x123456789abcdef0));
@@ -4592,6 +4950,21 @@ static void test_hp_i2000_migration(void)
              "{'uri':%s,'exit-on-error':false}}", uri);
     hp_i2000_wait_for_migration(qts);
     g_assert_cmphex(qtest_readb(qts, HP_I2000_CF8_PA + 1), ==, 0x5a);
+    hp_i2000_keyboard_command(qts, 0x21);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    hp_i2000_keyboard_event(qts, "a", true, "");
+    hp_i2000_keyboard_event(qts, "a", false, "");
+    hp_i2000_keyboard_event(qts, "a", true, "\x1c");
+    hp_i2000_keyboard_event(qts, "a", false, "");
+    hp_i2000_keyboard_event(qts, "b", true, "");
+    hp_i2000_keyboard_event(qts, "b", false, "\xf0\x32");
+    hp_i2000_keyboard_event(qts, "c", true, "\x21");
+    hp_i2000_keyboard_event(qts, "c", false, "");
+    qtest_qmp_assert_success(qts, "{'execute':'stop'}");
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, 0xd4);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, 0x5a);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x778), ==, 0xa5);
+    g_assert_cmphex(hp_i2000_inb(qts, 0x77a), ==, 0xd5);
     g_assert_cmphex(qtest_readw(qts, HP_I2000_CF8_PA + 2), ==, 0xa55a);
     g_assert_cmphex(qtest_readq(
                         qts, IA64_I2000_PROFILE_NVRAM_BASE + 0x80), ==,
@@ -4787,6 +5160,16 @@ int main(int argc, char **argv)
     qtest_add_func("/hp-i2000/isa-pid-fanout",
                    test_hp_i2000_isa_pid_fanout);
     qtest_add_func("/hp-i2000/i8042-reset", test_hp_i2000_i8042_reset);
+    qtest_add_func("/hp-i2000/parallel-fifo", test_hp_i2000_parallel_fifo);
+    qtest_add_func("/hp-i2000/keyboard-defaults",
+                   test_hp_i2000_keyboard_defaults);
+    qtest_add_func("/hp-i2000/keyboard-invalid-key",
+                   test_hp_i2000_keyboard_invalid_key);
+    qtest_add_func("/hp-i2000/keyboard-key-types",
+                   test_hp_i2000_keyboard_key_types);
+    qtest_add_func("/hp-i2000/parallel-irq", test_hp_i2000_parallel_irq);
+    qtest_add_func("/hp-i2000/parallel-thresholds",
+                   test_hp_i2000_parallel_thresholds);
     qtest_add_func("/hp-i2000/graphics-defaults",
                    test_hp_i2000_graphics_defaults);
     qtest_add_func("/hp-i2000/graphics-options",

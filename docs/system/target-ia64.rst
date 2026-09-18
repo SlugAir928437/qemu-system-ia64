@@ -30,6 +30,10 @@ The machine models are grouped by processor generation:
 ``hp-i2000`` and ``hp-zx6000`` two, and ``hp-rx2660`` eight.  Use
 ``-accel tcg,thread=multi`` for more than one CPU.
 
+``-machine ...,usb1=on`` limits USB ports to low/full speed (1.5/12 Mb/s),
+including ports on hubs and hotplugged controllers.  Both the port and the
+device must support one of these speeds.  The default is ``usb1=off``.
+
 CPU model names
 ---------------
 

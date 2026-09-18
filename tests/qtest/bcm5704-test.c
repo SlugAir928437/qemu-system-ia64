@@ -454,9 +454,27 @@ static uint32_t bcm57xx_read_desc(QTestState *qts, uint64_t addr, bool be)
     return be ? ldl_be_p(buf) : ldl_le_p(buf);
 }
 
+/* BCM57XX Programmer's Guide, tables 112-115: the BD host address. */
+static void bcm57xx_desc_address(QTestState *qts, uint64_t desc, uint64_t addr,
+                                 bool big_endian, bool word_swap)
+{
+    uint8_t buf[8];
+
+    if (big_endian) {
+        stq_be_p(buf, addr);
+    } else if (word_swap) {
+        stl_le_p(buf, addr >> 32);
+        stl_le_p(buf + 4, addr);
+    } else {
+        stq_le_p(buf, addr);
+    }
+    qtest_memwrite(qts, desc, buf, sizeof(buf));
+}
+
 static void test_bcm57xx_datapath(gconstpointer opaque)
 {
     bool big_endian = GPOINTER_TO_INT(opaque) & 1;
+    const uint64_t word_xor = GPOINTER_TO_INT(opaque) & 4 ? 4 : 0;
     const char *model = GPOINTER_TO_INT(opaque) & 2 ? "bcm5704" : "bcm5701";
     g_autofree char *cmd = g_strdup_printf(
         "-machine ia64-vpc,nvram=none -m 4G -nodefaults -bios none -S "
@@ -465,10 +483,10 @@ static void test_bcm57xx_datapath(gconstpointer opaque)
     QGenericPCIBus gbus;
     QPCIDevice *dev;
     QPCIBar bar;
-    uint8_t packet[60], received[64];
+    uint8_t packet[60], received[64], desc_addr[8], returned_addr[8];
     const uint64_t txring = 0x100000, rxring = 0x110000;
     const uint64_t retr = 0x120000, status = 0x130000;
-    const uint64_t txbuf = 0x140000, rxbuf = 0x150000;
+    const uint64_t txbuf = 0x100140000, rxbuf = 0x100150000;
     unsigned i;
     uint32_t ctrl;
 
@@ -506,7 +524,8 @@ static void test_bcm57xx_datapath(gconstpointer opaque)
     g_assert_cmphex(qpci_config_readw(dev, 0x4c) & 3, ==, 3);
     qpci_config_writew(dev, 0x4c, 0);
 
-    qpci_io_writel(dev, bar, 0x6800, 0x20034 | (big_endian ? 2 : 0));
+    qpci_io_writel(dev, bar, 0x6800, 0x20030 | (word_xor ? 0 : 4) |
+                   (big_endian ? 2 : 0));
     /* Host send ring and host receive return ring, four entries each. */
     bcm57xx_sram_write(dev, 0x100, 0);
     bcm57xx_sram_write(dev, 0x104, txring);
@@ -536,27 +555,30 @@ static void test_bcm57xx_datapath(gconstpointer opaque)
     packet[13] = 0xb5;
     qtest_memwrite(qts, txbuf, packet, sizeof(packet));
     qtest_memset(qts, rxbuf, 0xa5, 128);
-    bcm57xx_desc_word(qts, rxring, 0, big_endian);
-    bcm57xx_desc_word(qts, rxring + 4, rxbuf, big_endian);
-    bcm57xx_desc_word(qts, rxring + 8, 1536, big_endian);
-    bcm57xx_desc_word(qts, rxring + 28, 0xdeadbeef, big_endian);
+    bcm57xx_desc_address(qts, rxring, rxbuf, big_endian, !word_xor);
+    bcm57xx_desc_word(qts, (rxring + 8) ^ word_xor, 1536, big_endian);
+    bcm57xx_desc_word(qts, (rxring + 28) ^ word_xor, 0xdeadbeef, big_endian);
     qpci_io_writel(dev, bar, 0x26c, 1);
     /* A packet split over two descriptors must retain the first fragment. */
-    bcm57xx_desc_word(qts, txring, 0, big_endian);
-    bcm57xx_desc_word(qts, txring + 4, txbuf, big_endian);
-    bcm57xx_desc_word(qts, txring + 8, 20 << 16, big_endian);
-    bcm57xx_desc_word(qts, txring + 16, 0, big_endian);
-    bcm57xx_desc_word(qts, txring + 20, txbuf + 20, big_endian);
-    bcm57xx_desc_word(qts, txring + 24, (40 << 16) | 4, big_endian);
+    bcm57xx_desc_address(qts, txring, txbuf, big_endian, !word_xor);
+    bcm57xx_desc_word(qts, (txring + 8) ^ word_xor, 20 << 16, big_endian);
+    bcm57xx_desc_address(qts, txring + 16, txbuf + 20, big_endian, !word_xor);
+    bcm57xx_desc_word(qts, (txring + 24) ^ word_xor,
+                      (40 << 16) | 4, big_endian);
     qpci_io_writel(dev, bar, 0x304, 1);
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x3c80), ==, 0);
     qpci_io_writel(dev, bar, 0x304, 2);
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x3c80), ==, 1);
-    g_assert_cmphex(bcm57xx_read_desc(qts, status + 16, big_endian),
-                    ==, 0x20001);
-    g_assert_cmphex(bcm57xx_read_desc(qts, retr + 8, big_endian), ==, 64);
-    g_assert_cmphex(bcm57xx_read_desc(qts, retr + 28, big_endian),
+    g_assert_cmphex(bcm57xx_read_desc(qts, (status + 16) ^ word_xor,
+                                    big_endian), ==, 0x20001);
+    g_assert_cmphex(bcm57xx_read_desc(qts, (retr + 8) ^ word_xor, big_endian),
+                    ==, 64);
+    g_assert_cmphex(bcm57xx_read_desc(qts, (retr + 28) ^ word_xor, big_endian),
                     ==, 0xdeadbeef);
+    qtest_memread(qts, rxring, desc_addr, sizeof(desc_addr));
+    qtest_memread(qts, retr, returned_addr, sizeof(returned_addr));
+    g_assert_cmpmem(returned_addr, sizeof(returned_addr),
+                    desc_addr, sizeof(desc_addr));
     qtest_memread(qts, rxbuf, received, sizeof(received));
     g_assert_cmpmem(received, sizeof(packet), packet, sizeof(packet));
     g_assert_cmphex(qtest_readb(qts, rxbuf + 64), ==, 0xa5);
@@ -574,23 +596,25 @@ static void test_bcm57xx_datapath(gconstpointer opaque)
 
     /* Tagged rearm must report completions newer than the acknowledged tag. */
     qpci_config_writel(dev, 0x68, ctrl | 0x200);
-    ctrl = bcm57xx_read_desc(qts, status + 4, big_endian);
+    ctrl = bcm57xx_read_desc(qts, (status + 4) ^ word_xor, big_endian);
     qpci_io_writel(dev, bar, 0x204, 1);
     qpci_io_writel(dev, bar, 0x3c00, 0x10a);
     qpci_io_writel(dev, bar, 0x204, ctrl << 24);
     g_assert_cmphex(qpci_config_readl(dev, 0x70) & 2, ==, 0);
-    ctrl = bcm57xx_read_desc(qts, status + 4, big_endian);
+    ctrl = bcm57xx_read_desc(qts, (status + 4) ^ word_xor, big_endian);
     qpci_io_writel(dev, bar, 0x204, ctrl << 24);
     g_assert_cmphex(qpci_config_readl(dev, 0x70) & 2, ==, 2);
     /* Host statistics carry packet and octet counts in high/low pairs. */
-    g_assert_cmphex(bcm57xx_read_desc(qts, 0x180104, big_endian), ==, 60);
-    g_assert_cmphex(bcm57xx_read_desc(qts, 0x180304, big_endian), ==, 60);
-    g_assert_cmphex(bcm57xx_read_desc(qts, 0x1803dc, big_endian), ==, 1);
+    g_assert_cmphex(bcm57xx_read_desc(qts, 0x180104 ^ word_xor, big_endian),
+                    ==, 60);
+    g_assert_cmphex(bcm57xx_read_desc(qts, 0x180304 ^ word_xor, big_endian),
+                    ==, 60);
+    g_assert_cmphex(bcm57xx_read_desc(qts, 0x1803dc ^ word_xor, big_endian),
+                    ==, 1);
 
     /* A descriptor exceeding the frame buffer must not DMA beyond it. */
-    bcm57xx_desc_word(qts, txring + 32, 0, big_endian);
-    bcm57xx_desc_word(qts, txring + 36, txbuf, big_endian);
-    bcm57xx_desc_word(qts, txring + 40, 0xffff0004, big_endian);
+    bcm57xx_desc_address(qts, txring + 32, txbuf, big_endian, !word_xor);
+    bcm57xx_desc_word(qts, (txring + 40) ^ word_xor, 0xffff0004, big_endian);
     qpci_io_writel(dev, bar, 0x304, 3);
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x4804) & 8, ==, 8);
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x3cc0), ==, 2);
@@ -599,11 +623,14 @@ static void test_bcm57xx_datapath(gconstpointer opaque)
     qtest_quit(qts);
 }
 
-static void test_bcm57xx_dma_queues(void)
+static void test_bcm57xx_dma_queues(gconstpointer opaque)
 {
-    QTestState *qts = qtest_init(
+    bool big_endian = GPOINTER_TO_INT(opaque) & 1;
+    unsigned word_xor = GPOINTER_TO_INT(opaque) & 4 ? 4 : 0;
+    const char *model = GPOINTER_TO_INT(opaque) & 2 ? "bcm5704" : "bcm5701";
+    QTestState *qts = qtest_initf(
         "-machine ia64-vpc,nvram=none -m 4G -nodefaults -bios none -S "
-        "-device bcm5701,bus=pci,addr=7.0");
+        "-device %s,bus=pci,addr=7.0", model);
     QGenericPCIBus gbus;
     QPCIDevice *dev;
     QPCIBar bar;
@@ -616,9 +643,11 @@ static void test_bcm57xx_dma_queues(void)
     qpci_config_writew(dev, PCI_COMMAND,
                        qpci_config_readw(dev, PCI_COMMAND) |
                        PCI_COMMAND_MASTER);
-    qpci_io_writel(dev, bar, 0x6800, 0x34);
+    qpci_io_writel(dev, bar, 0x6800, 0x30 | (word_xor ? 0 : 4) |
+                   (big_endian ? 2 : 0));
     for (i = 0; i < 256; i += 4) {
-        qtest_writel(qts, 0x100000 + i, i ^ 0x12345678);
+        bcm57xx_desc_word(qts, 0x100000 + (i ^ word_xor),
+                          i ^ 0x12345678, big_endian);
     }
     bcm57xx_sram_write(dev, 0x2000, 0);
     bcm57xx_sram_write(dev, 0x2004, 0x100000);
@@ -628,13 +657,15 @@ static void test_bcm57xx_dma_queues(void)
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x5cd8), ==, 0x2000);
     for (i = 0; i < 256; i += 4) {
         g_assert_cmphex(bcm57xx_sram_read(dev, 0x2100 + i), ==, i ^ 0x12345678);
+        bcm57xx_sram_write(dev, 0x2100 + i, ~(i ^ 0x12345678));
     }
     bcm57xx_sram_write(dev, 0x2004, 0x110000);
     bcm57xx_sram_write(dev, 0x200c, 0x10070100);
     qpci_io_writel(dev, bar, 0x5c78, 0x2000);
     g_assert_cmphex(qpci_io_readl(dev, bar, 0x5d08), ==, 0x2000);
     for (i = 0; i < 256; i += 4) {
-        g_assert_cmphex(qtest_readl(qts, 0x110000 + i), ==, i ^ 0x12345678);
+        g_assert_cmphex(bcm57xx_read_desc(qts, 0x110000 + (i ^ word_xor),
+                                        big_endian), ==, ~(i ^ 0x12345678));
     }
     g_free(dev);
     qtest_quit(qts);
@@ -894,7 +925,13 @@ int main(int argc, char **argv)
                        test_bcm57xx_partial_w1c);
     qtest_add_data_func("/bcm57xx/5704-partial-w1c", "bcm5704",
                        test_bcm57xx_partial_w1c);
-    qtest_add_func("/bcm57xx/diagnostic-dma", test_bcm57xx_dma_queues);
+    for (unsigned i = 0; i < 8; i++) {
+        g_autofree char *name = g_strdup_printf(
+            "/bcm57xx/%s-diagnostic-dma-%s%s", i & 2 ? "5704" : "5701",
+            i & 1 ? "be" : "le", i & 4 ? "-no-word-swap" : "");
+
+        qtest_add_data_func(name, GINT_TO_POINTER(i), test_bcm57xx_dma_queues);
+    }
     qtest_add_func("/bcm57xx/tso-interleaved-rings", test_bcm57xx_tso);
     qtest_add_data_func("/bcm57xx/5701-datapath-le", GINT_TO_POINTER(0),
                         test_bcm57xx_datapath);
@@ -904,6 +941,14 @@ int main(int argc, char **argv)
                         test_bcm57xx_datapath);
     qtest_add_data_func("/bcm57xx/5704-datapath-be", GINT_TO_POINTER(3),
                         test_bcm57xx_datapath);
+    qtest_add_data_func("/bcm57xx/5701-datapath-le-no-word-swap",
+                        GINT_TO_POINTER(4), test_bcm57xx_datapath);
+    qtest_add_data_func("/bcm57xx/5701-datapath-be-no-word-swap",
+                        GINT_TO_POINTER(5), test_bcm57xx_datapath);
+    qtest_add_data_func("/bcm57xx/5704-datapath-le-no-word-swap",
+                        GINT_TO_POINTER(6), test_bcm57xx_datapath);
+    qtest_add_data_func("/bcm57xx/5704-datapath-be-no-word-swap",
+                        GINT_TO_POINTER(7), test_bcm57xx_datapath);
     for (unsigned i = 0; i < 4; i++) {
         g_autofree char *name = g_strdup_printf(
             "/bcm57xx/%s-rx-coalescing-%s", i & 2 ? "5704" : "5701",

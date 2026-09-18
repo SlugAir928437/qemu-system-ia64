@@ -44,11 +44,19 @@ enum {
     E100_CU_RESUME = 0x20,
     E100_CU_HP_START = 0x30,
     E100_CU_STATSADDR = 0x40,
+    E100_CU_SHOWSTATS = 0x50,
     E100_CU_LOAD_BASE = 0x60,
     E100_CU_DUMPSTATS = 0x70,
     E100_CU_STATIC_RESUME = 0xa0,
     E100_CU_HP_RESUME = 0xb0,
+    E100_RU_START = 1,
+    E100_RU_RESUME = 2,
+    E100_RU_ABORT = 4,
+    E100_RU_LOAD_BASE = 6,
     E100_RU_RESERVED = 0x08,
+    E100_RU_STATE_MASK = 0x3c,
+    E100_RU_STATE_NO_RESOURCES = 0x08,
+    E100_RU_STATE_READY = 0x10,
     E100_CU_STATE_MASK = 0xc0,
     E100_CU_STATE_IDLE = 0x00,
     E100_CU_STATE_SUSPENDED = 0x40,
@@ -61,8 +69,12 @@ enum {
     E100_STATS_STANDARD_SIZE = 64,
     E100_STATS_EXTENDED_SIZE = 76,
     E100_STATS_TCO_SIZE = 80,
+    E100_STATS_RX_GOOD = 36,
+    E100_STATS_RX_RESOURCE = 48,
     E100_STATS_COMPLETE_DUMP_RESET = 0xa007,
     E100_SCB_STATUS_MDI = BIT(11),
+    E100_SCB_STATUS_RNR = BIT(12),
+    E100_SCB_STATUS_FR = BIT(14),
     E100_MDI_READY = BIT(28),
     E100_MDI_INTERRUPT = BIT(29),
     E100_MDI_WRITE = 1U << 26,
@@ -721,6 +733,14 @@ static void eepro100_receive_crc(void *obj, void *data, QGuestAllocator *alloc)
     uint8_t packet[64];
     uint8_t cb[32] = { 0 };
     uint8_t received[80];
+    static const struct {
+        uint16_t type_length;
+        uint32_t crc;
+    } frames[] = {
+        { 20, 0x8a151885 },
+        { 0, 0xd5a59a45 },
+        { 0x0800, 0xe35bfae4 },
+    };
 
     qpci_device_enable(dev);
     bar = qpci_iomap(dev, 0, NULL);
@@ -729,13 +749,16 @@ static void eepro100_receive_crc(void *obj, void *data, QGuestAllocator *alloc)
         packet[i + 4] = i;
     }
     memset(packet + 4, 0xff, 6);
-    packet[16] = 0;
-    packet[17] = 20; /* IEEE 802.3 payload length, followed by padding. */
-    for (unsigned int variant = 0; variant < 4; variant++) {
-        unsigned int length = variant & 1 ? 34 : 60;
-        unsigned int total = length + (variant & 2 ? 4 : 0);
+    for (unsigned int variant = 0;
+        variant < 4 * ARRAY_SIZE(frames); variant++) {
+        unsigned int frame = variant / 4;
+        bool strip = variant & 1;
+        bool crc_transfer = variant & 2;
+        unsigned int length = frame == 0 && strip && !crc_transfer ? 34 : 60;
+        unsigned int total = length + (crc_transfer ? 4 : 0);
         uint8_t header[16] = { 0 };
 
+        stw_be_p(packet + 16, frames[frame].type_length);
         stw_le_p(cb + 2, E100_CB_COMMAND_EL | E100_CB_COMMAND_CONFIGURE);
         cb[8] = 22;
         cb[8 + 15] = 1; /* promiscuous */
@@ -757,17 +780,334 @@ static void eepro100_receive_crc(void *obj, void *data, QGuestAllocator *alloc)
             qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
         }
         g_assert_cmphex(qtest_readw(qts, rfd) & 0xa080, ==, 0xa000);
-        g_assert_cmpuint(qtest_readw(qts, rfd + 12), ==, total);
+        g_assert_cmphex(qtest_readw(qts, rfd) & 0x20, ==, frame ? 0x20 : 0);
+        g_assert_cmphex(qtest_readw(qts, rfd + 12), ==, 0xc000 | total);
         qtest_memread(qts, rfd + 16, received, sizeof(received));
         g_assert_cmpmem(received, length, packet + 4, length);
         if (variant & 2) {
             g_assert_cmphex((uint32_t)ldl_le_p(received + length),
-                            ==, 0x8a151885);
+                            ==, frames[frame].crc);
         }
         g_assert_cmphex(received[total], ==, 0xa5);
     }
     guest_free(alloc, config);
     guest_free(alloc, rfd);
+}
+
+static void eepro100_receive_flexible(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QPCIDevice *dev = &((QEEPRO100 *)obj)->dev;
+    QTestState *qts = dev->bus->qts;
+    int *sockets = data;
+    QPCIBar bar;
+    uint64_t config = guest_alloc(alloc, 32);
+    uint64_t rfds = guest_alloc(alloc, 128);
+    uint64_t rbds = guest_alloc(alloc, 64);
+    uint64_t buffers = guest_alloc(alloc, 256);
+    uint8_t cb[32] = { 0 };
+    uint8_t packet[64];
+    uint8_t received[60];
+    const uint32_t ru_base = 0x1000;
+
+    qpci_device_enable(dev);
+    bar = qpci_iomap(dev, 0, NULL);
+    stw_le_p(cb + 2, E100_CB_COMMAND_EL | E100_CB_COMMAND_CONFIGURE);
+    cb[8] = 22;
+    cb[8 + 6] = BIT(7); /* Save Bad Frames */
+    qtest_memwrite(qts, config, cb, sizeof(cb));
+    qpci_io_writel(dev, bar, E100_SCB_POINTER, config);
+    qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_START);
+    stl_be_p(packet, 60);
+    memset(packet + 4, 0xff, 60);
+    stw_be_p(packet + 16, 0x0800);
+    qtest_memset(qts, buffers, 0xa5, 256);
+    qtest_memset(qts, rfds, 0xa5, 128);
+    for (unsigned int i = 0; i < 2; i++) {
+        uint8_t rfd[16] = { 0 };
+
+        stw_le_p(rfd + 2, 0x0008 | (i ? 0x8000 : 0));
+        stl_le_p(rfd + 4, i ? UINT32_MAX : rfds + 64 - ru_base);
+        stl_le_p(rfd + 8, i ? UINT32_MAX : rbds);
+        qtest_memwrite(qts, rfds + 64 * i, rfd, sizeof(rfd));
+    }
+    for (unsigned int i = 0; i < 3; i++) {
+        uint8_t rbd[16] = { 0 };
+
+        stl_le_p(rbd + 4, rbds + 16 * (i + 1));
+        stl_le_p(rbd + 8, buffers + 80 * i);
+        stw_le_p(rbd + 12, (i ? 80 : 32) | (i == 2 ? 0x8000 : 0));
+        qtest_memwrite(qts, rbds + 16 * i, rbd, sizeof(rbd));
+    }
+    qpci_io_writel(dev, bar, E100_SCB_POINTER, ru_base);
+    qpci_io_writeb(dev, bar, E100_SCB_COMMAND, 6); /* RU_BASE */
+    qpci_io_writel(dev, bar, E100_SCB_POINTER, rfds - ru_base);
+    qpci_io_writeb(dev, bar, E100_SCB_COMMAND, 1); /* RU_START */
+    for (unsigned int i = 0; i < 2; i++) {
+        uint64_t rfd = rfds + 64 * i;
+
+        g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                        ==, sizeof(packet));
+        for (unsigned int tries = 0; !(qtest_readw(qts, rfd) & 0x8000) &&
+             tries < 1000; tries++) {
+            qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+        }
+        g_assert_cmphex(qtest_readw(qts, rfd), ==, 0xa022);
+        g_assert_cmphex(qtest_readw(qts, rfd + 12), ==, 0xc03c);
+        g_assert_cmphex(qtest_readb(qts, rfd + 16), ==, 0xa5);
+    }
+    g_assert_cmphex(qtest_readw(qts, rbds), ==, 0x4020);
+    g_assert_cmphex(qtest_readw(qts, rbds + 16), ==, 0xc01c);
+    g_assert_cmphex(qtest_readw(qts, rbds + 32), ==, 0xc03c);
+    g_assert_cmphex(qtest_readl(qts, rfds + 64 + 8), ==, rbds + 32);
+    qtest_memread(qts, buffers, received, 32);
+    qtest_memread(qts, buffers + 80, received + 32, 28);
+    g_assert_cmpmem(received, sizeof(received), packet + 4, 60);
+    qtest_memread(qts, buffers + 160, received, 60);
+    g_assert_cmpmem(received, sizeof(received), packet + 4, 60);
+    g_assert_cmphex(qtest_readb(qts, buffers + 32), ==, 0xa5);
+    g_assert_cmphex(qtest_readb(qts, buffers + 108), ==, 0xa5);
+    g_assert_cmphex(qtest_readb(qts, buffers + 220), ==, 0xa5);
+
+    /* Exhausted, empty, and already filled RBDs must not overrun buffers. */
+    for (unsigned int variant = 0; variant < 3; variant++) {
+        unsigned int length = variant == 0 ? 16 : 0;
+
+        qtest_writew(qts, rfds, 0);
+        qtest_writew(qts, rfds + 2, 0x8008);
+        qtest_writel(qts, rfds + 4, UINT32_MAX);
+        qtest_writel(qts, rfds + 8, rbds);
+        qtest_writew(qts, rbds, variant == 2 ? 0xc010 : 0);
+        qtest_writel(qts, rbds + 4, rbds);
+        qtest_writew(qts, rbds + 12, variant == 1 ? 0 : 0x8010);
+        qtest_memset(qts, buffers, 0xa5, 80);
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, rfds - ru_base);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, 1);
+        g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                        ==, sizeof(packet));
+        for (unsigned int tries = 0; !(qtest_readw(qts, rfds) & 0x8000) &&
+             tries < 1000; tries++) {
+            qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+        }
+        g_assert_cmphex(qtest_readw(qts, rfds), ==, 0x8222);
+        g_assert_cmphex(qtest_readw(qts, rfds + 12), ==, 0xc000 | length);
+        g_assert_cmphex(qtest_readb(qts, buffers + length), ==, 0xa5);
+    }
+    guest_free(alloc, buffers);
+    guest_free(alloc, rbds);
+    guest_free(alloc, rfds);
+    guest_free(alloc, config);
+}
+
+static void eepro100_wait_rx_resource_error(QPCIDevice *dev, QPCIBar bar,
+                                            uint64_t stats, uint32_t expected)
+{
+    QTestState *qts = dev->bus->qts;
+
+    /* Discarded frames need not complete an RFD or raise FR. */
+    for (unsigned int tries = 0; tries < 1000; tries++) {
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_SHOWSTATS);
+        if (qtest_readl(qts, stats + E100_STATS_RX_RESOURCE) == expected) {
+            return;
+        }
+        qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+    }
+    g_error("eepro100 did not report %u receive resource errors", expected);
+}
+
+static void eepro100_receive_bad_frames(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const struct E100BadFrameCase {
+        uint16_t command;
+        uint16_t inline_size;
+        uint16_t last_rbd_count;
+        uint16_t last_rbd_size;
+        unsigned int copied;
+    } cases[] = {
+        { 0,      16, 0,      0,      16 },
+        { 0x8000, 16, 0,      0,      16 },
+        { 0x0008,  0, 0,      0x8010, 32 },
+        { 0x4008, 14, 0,      0x8010, 46 },
+        { 0x0008,  0, 0,      0,      16 },
+        { 0x0008,  0, 0xc010, 0x8010, 16 },
+    };
+    QPCIDevice *dev = &((QEEPRO100 *)obj)->dev;
+    QTestState *qts = dev->bus->qts;
+    int *sockets = data;
+    QPCIBar bar;
+    uint64_t config = guest_alloc(alloc, 32);
+    uint64_t rfds = guest_alloc(alloc, 256);
+    uint64_t rbds = guest_alloc(alloc, 48);
+    uint64_t buffers = guest_alloc(alloc, 256);
+    uint64_t stats = guest_alloc(alloc, E100_STATS_TCO_SIZE + 4);
+    uint8_t packet[64];
+    uint8_t received[60];
+    const uint32_t ru_base = 0x1000;
+    const uint16_t rx_interrupts = E100_SCB_STATUS_FR | E100_SCB_STATUS_RNR;
+
+    qpci_device_enable(dev);
+    bar = qpci_iomap(dev, 0, NULL);
+    qpci_io_writel(dev, bar, E100_SCB_POINTER, ru_base);
+    qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_RU_LOAD_BASE);
+    stl_be_p(packet, 60);
+    memset(packet + 4, 0xff, 60);
+    stw_be_p(packet + 16, 0x0800);
+
+    for (unsigned int variant = 0; variant < 2 * ARRAY_SIZE(cases); variant++) {
+        const struct E100BadFrameCase *test = &cases[variant / 2];
+        bool save_bad = variant & 1;
+        bool flexible = test->command & 8;
+        bool stopped = flexible || (save_bad && (test->command & 0x8000));
+        bool last_used = test->copied > test->inline_size + 16;
+        uint16_t interrupts = (save_bad ? E100_SCB_STATUS_FR : 0) |
+                              (stopped ? E100_SCB_STATUS_RNR : 0);
+        uint8_t cb[32] = { 0 };
+        uint8_t rfd[16] = { 0 };
+        uint8_t after[16];
+        uint64_t next_rfd = rfds + 128;
+        uint64_t target = save_bad ? next_rfd : rfds;
+        unsigned int errors = 1;
+
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_RU_ABORT);
+        stw_le_p(cb + 2, E100_CB_COMMAND_EL | E100_CB_COMMAND_CONFIGURE);
+        cb[8] = 22;
+        cb[8 + 6] = BIT(5) | (save_bad ? BIT(7) : 0);
+        qtest_memwrite(qts, config, cb, sizeof(cb));
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, config);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_START);
+        g_assert_cmphex(qtest_readw(qts, config), ==, 0xa000);
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, stats);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_STATSADDR);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_DUMPSTATS);
+
+        qtest_memset(qts, rfds, 0xa5, 256);
+        qtest_memset(qts, buffers, 0xa5, 256);
+        stw_le_p(rfd + 2, test->command);
+        stl_le_p(rfd + 4, next_rfd - ru_base);
+        stl_le_p(rfd + 8, rbds);
+        stw_le_p(rfd + 14, test->inline_size);
+        qtest_memwrite(qts, rfds, rfd, sizeof(rfd));
+        qtest_memset(qts, next_rfd, 0, 16);
+        qtest_writel(qts, next_rfd + 8, UINT32_MAX);
+        for (unsigned int i = 0; i < 2; i++) {
+            uint8_t rbd[16] = { 0 };
+
+            stw_le_p(rbd, i ? test->last_rbd_count : 0);
+            stl_le_p(rbd + 4, i ? UINT32_MAX : rbds + 16);
+            stl_le_p(rbd + 8, buffers + 80 * i);
+            stw_le_p(rbd + 12, i ? test->last_rbd_size : 16);
+            qtest_memwrite(qts, rbds + 16 * i, rbd, sizeof(rbd));
+        }
+        qpci_io_writeb(dev, bar, E100_SCB_STATUS + 1, 0xff);
+        qpci_io_writel(dev, bar, E100_SCB_POINTER, rfds - ru_base);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_RU_START);
+        g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                        ==, sizeof(packet));
+        eepro100_wait_rx_resource_error(dev, bar, stats, errors);
+        g_assert_cmphex(qtest_readl(qts, stats + E100_STATS_RX_GOOD), ==, 0);
+        g_assert_cmphex(qpci_io_readw(dev, bar, E100_SCB_STATUS) &
+                        rx_interrupts, ==, interrupts);
+        g_assert_cmphex(qpci_io_readb(dev, bar, E100_SCB_STATUS) &
+                        E100_RU_STATE_MASK, ==, stopped ?
+                        E100_RU_STATE_NO_RESOURCES : E100_RU_STATE_READY);
+        if (save_bad) {
+            g_assert_cmphex(qtest_readw(qts, rfds), ==, 0x8222);
+            g_assert_cmphex(qtest_readw(qts, rfds + 12), ==,
+                            0xc000 | test->copied);
+        } else {
+            qtest_memread(qts, rfds, after, sizeof(after));
+            g_assert_cmpmem(after, sizeof(after), rfd, sizeof(rfd));
+        }
+        g_assert_cmphex(qtest_readw(qts, next_rfd), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, next_rfd + 8), ==,
+                        flexible && save_bad && !last_used ?
+                        rbds + 16 : UINT32_MAX);
+        g_assert_cmphex(qtest_readb(qts, rfds + 16 + test->inline_size),
+                        ==, 0xa5);
+        if (flexible) {
+            g_assert_cmphex(qtest_readw(qts, rbds), ==,
+                            save_bad ? (last_used ? 0x4010 : 0xc010) : 0);
+            g_assert_cmphex(qtest_readw(qts, rbds + 16), ==,
+                            save_bad && last_used ? 0xc010 :
+                            test->last_rbd_count);
+            g_assert_cmphex(qtest_readb(qts, buffers + 16), ==, 0xa5);
+            g_assert_cmphex(qtest_readb(qts, buffers + 80 +
+                                       (last_used ? 16 : 0)), ==, 0xa5);
+        }
+        if (stopped) {
+            /* No subsequent RFD may be consumed before the RU restarts. */
+            qtest_memread(qts, rfds, rfd, sizeof(rfd));
+            qpci_io_writeb(dev, bar, E100_SCB_STATUS + 1, 0xff);
+            g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                            ==, sizeof(packet));
+            eepro100_wait_rx_resource_error(dev, bar, stats, ++errors);
+            qtest_memread(qts, rfds, after, sizeof(after));
+            g_assert_cmpmem(after, sizeof(after), rfd, sizeof(rfd));
+            g_assert_cmphex(qtest_readw(qts, next_rfd), ==, 0);
+            g_assert_cmphex(qpci_io_readw(dev, bar, E100_SCB_STATUS) &
+                            E100_SCB_STATUS_FR, ==, 0);
+        }
+
+        /* Supply space and receive through the retained or following RFD. */
+        qtest_writew(qts, target + 2, 0x8000 | (flexible ? 8 : 0));
+        qtest_writew(qts, target + 14, flexible ? test->inline_size : 80);
+        qtest_writel(qts, target + 4, UINT32_MAX);
+        if (flexible && save_bad) {
+            uint8_t rbd[16] = { 0 };
+
+            stl_le_p(rbd + 4, UINT32_MAX);
+            stl_le_p(rbd + 8, buffers + 160);
+            stw_le_p(rbd + 12, 0x8040);
+            qtest_memwrite(qts, rbds + 32, rbd, sizeof(rbd));
+            qtest_writel(qts, target + 8, rbds + 32);
+        } else if (flexible) {
+            qtest_writew(qts, rbds + 16 + 12, 0x8040);
+            if (test->last_rbd_count) {
+                qtest_writew(qts, rbds + 16, 0);
+            }
+        }
+        qpci_io_writeb(dev, bar, E100_SCB_STATUS + 1, 0xff);
+        if (stopped) {
+            qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_RU_RESUME);
+        }
+        g_assert_cmpint(write(sockets[0], packet, sizeof(packet)),
+                        ==, sizeof(packet));
+        for (unsigned int tries = 0; !(qtest_readw(qts, target) & 0x8000) &&
+             tries < 1000; tries++) {
+            qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+        }
+        g_assert_cmphex(qtest_readw(qts, target), ==, 0xa022);
+        g_assert_cmphex(qtest_readw(qts, target + 12), ==, 0xc03c);
+        g_assert_cmphex(qpci_io_readw(dev, bar, E100_SCB_STATUS) &
+                        rx_interrupts, ==, rx_interrupts);
+        if (flexible) {
+            unsigned int head = test->inline_size;
+
+            if (head) {
+                qtest_memread(qts, target + 16, received, head);
+            }
+            if (save_bad) {
+                qtest_memread(qts, buffers + 160, received + head, 60 - head);
+            } else {
+                qtest_memread(qts, buffers, received + head, 16);
+                qtest_memread(qts, buffers + 80, received + head + 16,
+                              60 - head - 16);
+            }
+        } else {
+            qtest_memread(qts, target + 16, received, sizeof(received));
+        }
+        g_assert_cmpmem(received, sizeof(received), packet + 4, 60);
+        qpci_io_writeb(dev, bar, E100_SCB_COMMAND, E100_CU_SHOWSTATS);
+        g_assert_cmpuint(qtest_readl(qts, stats + E100_STATS_RX_GOOD), ==, 1);
+        g_assert_cmpuint(qtest_readl(qts, stats + E100_STATS_RX_RESOURCE),
+                         ==, errors);
+    }
+    guest_free(alloc, stats);
+    guest_free(alloc, buffers);
+    guest_free(alloc, rbds);
+    guest_free(alloc, rfds);
+    guest_free(alloc, config);
 }
 #endif
 
@@ -803,6 +1143,14 @@ static void eepro100_register_nodes(void)
 
     qos_add_test("receive-crc", "i82550", eepro100_receive_crc, &receive_opts);
     qos_add_test("receive-crc", "i82559c", eepro100_receive_crc, &receive_opts);
+    qos_add_test("receive-flexible", "i82550", eepro100_receive_flexible,
+                 &receive_opts);
+    qos_add_test("receive-flexible", "i82559c", eepro100_receive_flexible,
+                 &receive_opts);
+    qos_add_test("receive-bad-frames", "i82550", eepro100_receive_bad_frames,
+                 &receive_opts);
+    qos_add_test("receive-bad-frames", "i82559c", eepro100_receive_bad_frames,
+                 &receive_opts);
 #endif
 
     qos_add_test("flash-aperture", "i82559er",

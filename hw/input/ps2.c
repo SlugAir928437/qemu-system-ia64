@@ -46,8 +46,17 @@
 #define KBD_CMD_RESET_DISABLE   0xF5    /* reset and disable scanning */
 #define KBD_CMD_RESET_ENABLE    0xF6    /* reset and enable scanning */
 #define KBD_CMD_RESET           0xFF    /* Reset */
+#define KBD_CMD_SET_ALL_TYPEMATIC 0xF7
+#define KBD_CMD_SET_ALL_MAKE_BREAK 0xF8
+#define KBD_CMD_SET_ALL_MAKE     0xF9
+#define KBD_CMD_SET_KEY_TYPEMATIC 0xFB
 #define KBD_CMD_SET_MAKE_BREAK  0xFC    /* Set Make and Break mode */
+#define KBD_CMD_SET_MAKE        0xFD
 #define KBD_CMD_SET_TYPEMATIC   0xFA    /* Set Typematic Make and Break mode */
+
+#define KBD_KEY_BREAK           BIT(0)
+#define KBD_KEY_TYPEMATIC       BIT(1)
+#define KBD_KEY_TYPE_MASK       (KBD_KEY_BREAK | KBD_KEY_TYPEMATIC)
 
 /* Keyboard Replies */
 #define KBD_REPLY_POR       0xAA    /* Power on reset */
@@ -524,8 +533,15 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
         if (qcode < qemu_input_map_qcode_to_atset3_len) {
             keycode = qemu_input_map_qcode_to_atset3[qcode];
         }
-        if (keycode) {
-            /* FIXME: break code should be configured on a key by key basis */
+        if (keycode && keycode < ARRAY_SIZE(s->key_type)) {
+            bool was_down = s->key_down[keycode];
+            uint8_t type = s->key_type[keycode];
+
+            s->key_down[keycode] = key->down;
+            if (key->down ? was_down && !(type & KBD_KEY_TYPEMATIC) :
+                            !(type & KBD_KEY_BREAK)) {
+                return;
+            }
             if (!key->down) {
                 ps2_put_keycode(s, 0xf0);
             }
@@ -582,6 +598,77 @@ static void ps2_set_ledstate(PS2KbdState *s, int ledstate)
     kbd_put_ledstate(ledstate);
 }
 
+static int ps2_set3_default_key_type(unsigned keycode)
+{
+    /* IBM PC/XT 286 Technical Reference, set 3 tables, pages 4-24--4-26. */
+    static const uint8_t typematic[] = {
+        0x0d, 0x0e, 0x13, 0x15, 0x16, 0x1a, 0x1b, 0x1c,
+        0x1d, 0x1e, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
+        0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x31, 0x32,
+        0x33, 0x34, 0x35, 0x36, 0x3a, 0x3b, 0x3c, 0x3d,
+        0x3e, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x49,
+        0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x52, 0x53, 0x54,
+        0x55, 0x5a, 0x5b, 0x5c, 0x60, 0x61, 0x63, 0x64,
+        0x66, 0x6a, 0x7c,
+    };
+    static const uint8_t make_break[] = {
+        0x11, 0x12, 0x14, 0x19, 0x59,
+    };
+    static const uint8_t make_only[] = {
+        0x07, 0x08, 0x0f, 0x17, 0x1f, 0x27, 0x2f, 0x37,
+        0x39, 0x3f, 0x47, 0x4f, 0x56, 0x57, 0x58, 0x5e,
+        0x5f, 0x62, 0x65, 0x67, 0x69, 0x6b, 0x6c, 0x6d,
+        0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75,
+        0x76, 0x77, 0x79, 0x7a, 0x7d, 0x7e, 0x84,
+    };
+
+    if (!keycode || keycode > UINT8_MAX) {
+        return -1;
+    }
+    if (memchr(typematic, keycode, sizeof(typematic))) {
+        return KBD_KEY_TYPEMATIC;
+    }
+    if (memchr(make_break, keycode, sizeof(make_break))) {
+        return KBD_KEY_BREAK;
+    }
+    if (memchr(make_only, keycode, sizeof(make_only))) {
+        return 0;
+    }
+    /* Preserve the defaults for additional keys in QEMU's set 3 map. */
+    for (unsigned i = 0; i < qemu_input_map_qcode_to_atset3_len; i++) {
+        if (qemu_input_map_qcode_to_atset3[i] == keycode) {
+            return KBD_KEY_TYPE_MASK;
+        }
+    }
+    return -1;
+}
+
+static void ps2_reset_key_types(PS2KbdState *s)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(s->key_type); i++) {
+        int type = ps2_set3_default_key_type(i);
+
+        s->key_type[i] = type < 0 ? 0 : type;
+    }
+    memset(s->key_down, 0, sizeof(s->key_down));
+}
+
+static uint8_t ps2_key_type(int command)
+{
+    switch (command) {
+    case KBD_CMD_SET_ALL_TYPEMATIC:
+    case KBD_CMD_SET_KEY_TYPEMATIC:
+        return KBD_KEY_TYPEMATIC;
+    case KBD_CMD_SET_ALL_MAKE_BREAK:
+    case KBD_CMD_SET_MAKE_BREAK:
+        return KBD_KEY_BREAK;
+    case KBD_CMD_SET_TYPEMATIC:
+        return KBD_KEY_TYPE_MASK;
+    default:
+        return 0;
+    }
+}
+
 static void ps2_reset_keyboard(PS2KbdState *s)
 {
     PS2State *ps2 = PS2_DEVICE(s);
@@ -589,6 +676,7 @@ static void ps2_reset_keyboard(PS2KbdState *s)
     trace_ps2_reset_keyboard(s);
     s->scan_enabled = 1;
     s->scancode_set = 2;
+    ps2_reset_key_types(s);
     ps2_reset_queue(ps2);
     ps2_set_ledstate(s, 0);
 }
@@ -599,6 +687,13 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
 
     trace_ps2_write_keyboard(s, val);
     ps2_cqueue_reset(ps2);
+    /* Reserved command bytes must not terminate a key-type command. */
+    if (val >= KBD_CMD_SET_LEDS && val != 0xef && val != 0xf1 &&
+        (ps2->write_cmd == KBD_CMD_SET_KEY_TYPEMATIC ||
+         ps2->write_cmd == KBD_CMD_SET_MAKE_BREAK ||
+         ps2->write_cmd == KBD_CMD_SET_MAKE)) {
+        ps2->write_cmd = -1;
+    }
     switch (ps2->write_cmd) {
     default:
     case -1:
@@ -624,7 +719,13 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
         case KBD_CMD_SCANCODE:
         case KBD_CMD_SET_LEDS:
         case KBD_CMD_SET_RATE:
+            ps2->write_cmd = val;
+            ps2_cqueue_1(ps2, KBD_REPLY_ACK);
+            break;
+        case KBD_CMD_SET_KEY_TYPEMATIC:
         case KBD_CMD_SET_MAKE_BREAK:
+        case KBD_CMD_SET_MAKE:
+            ps2_reset_queue(ps2);
             ps2->write_cmd = val;
             ps2_cqueue_1(ps2, KBD_REPLY_ACK);
             break;
@@ -644,7 +745,12 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
                          KBD_REPLY_ACK,
                          KBD_REPLY_POR);
             break;
+        case KBD_CMD_SET_ALL_TYPEMATIC:
+        case KBD_CMD_SET_ALL_MAKE_BREAK:
+        case KBD_CMD_SET_ALL_MAKE:
         case KBD_CMD_SET_TYPEMATIC:
+            memset(s->key_type, ps2_key_type(val), sizeof(s->key_type));
+            ps2_reset_queue(ps2);
             ps2_cqueue_1(ps2, KBD_REPLY_ACK);
             break;
         default:
@@ -652,9 +758,15 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
             break;
         }
         break;
+    case KBD_CMD_SET_KEY_TYPEMATIC:
     case KBD_CMD_SET_MAKE_BREAK:
+    case KBD_CMD_SET_MAKE:
+        if (ps2_set3_default_key_type(val) < 0) {
+            ps2_cqueue_1(ps2, KBD_REPLY_RESEND);
+            break;
+        }
+        s->key_type[(uint8_t)val] = ps2_key_type(ps2->write_cmd);
         ps2_cqueue_1(ps2, KBD_REPLY_ACK);
-        ps2->write_cmd = -1;
         break;
     case KBD_CMD_SCANCODE:
         if (val == 0) {
@@ -662,6 +774,7 @@ void ps2_write_keyboard(PS2KbdState *s, int val)
                 translate_table[s->scancode_set] : s->scancode_set);
         } else if (val >= 1 && val <= 3) {
             s->scancode_set = val;
+            memset(s->key_down, 0, sizeof(s->key_down));
             ps2_cqueue_1(ps2, KBD_REPLY_ACK);
         } else {
             ps2_cqueue_1(ps2, KBD_REPLY_RESEND);
@@ -1063,6 +1176,7 @@ static void ps2_kbd_reset_hold(Object *obj, ResetType type)
     s->translate = 0;
     s->scancode_set = 2;
     s->modifiers = 0;
+    ps2_reset_key_types(s);
 }
 
 static void ps2_mouse_reset_hold(Object *obj, ResetType type)
@@ -1166,13 +1280,14 @@ static const VMStateDescription vmstate_ps2_keyboard_cqueue = {
 
 static int ps2_kbd_post_load(void *opaque, int version_id)
 {
-    PS2KbdState *s = (PS2KbdState *)opaque;
+    PS2KbdState *s = opaque;
     PS2State *ps2 = PS2_DEVICE(s);
 
-    if (version_id == 2) {
-        s->scancode_set = 2;
+    for (unsigned i = 0; i < ARRAY_SIZE(s->key_type); i++) {
+        if (s->key_type[i] & ~KBD_KEY_TYPE_MASK) {
+            return -EINVAL;
+        }
     }
-
     ps2_common_post_load(ps2);
 
     return 0;
@@ -1188,7 +1303,9 @@ static const VMStateDescription vmstate_ps2_keyboard = {
                        PS2State),
         VMSTATE_INT32(scan_enabled, PS2KbdState),
         VMSTATE_INT32(translate, PS2KbdState),
-        VMSTATE_INT32_V(scancode_set, PS2KbdState, 3),
+        VMSTATE_INT32(scancode_set, PS2KbdState),
+        VMSTATE_UINT8_ARRAY(key_type, PS2KbdState, 256),
+        VMSTATE_BOOL_ARRAY(key_down, PS2KbdState, 256),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

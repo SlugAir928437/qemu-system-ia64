@@ -103,9 +103,8 @@ void usb_keyboard_submit_interrupt_td(void);
 BOOLEAN usb_keyboard_init(void);
 
 EFI_HANDLE fw_usb_controller_handle(VOID);
-void fw_usb_controller_device_path(FW_ACPI_HID_DEVICE_PATH_NODE *acpi,
-                                   FW_PCI_DEVICE_PATH_NODE *pci,
-                                   FW_DEVICE_PATH_NODE *end);
+UINTN fw_usb_controller_device_path(UINT8 *buffer, UINTN capacity);
+EFI_HANDLE fw_usb_keyboard_handle(VOID);
 
 BOOLEAN fw_usb_protocols_install(VOID);
 

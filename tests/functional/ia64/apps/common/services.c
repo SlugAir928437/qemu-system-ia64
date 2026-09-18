@@ -637,6 +637,66 @@ static VOID release_table_context(EFI_SYSTEM_TABLE *SystemTable,
     Context->Valid = 0;
 }
 
+static BOOLEAN test_pool_padding(EFI_BOOT_SERVICES *BootServices)
+{
+    const UINTN sizes[] = { 8U, 24U, 31U, 264U, 1024U * 1024U + 1U };
+    UINT8 *buffers[sizeof(sizes) / sizeof(sizes[0])] = { 0 };
+    VOID *replacement = NULL;
+    UINTN i;
+    UINTN j;
+    BOOLEAN ok = 0;
+
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        if (BootServices->AllocatePool(EfiLoaderData, sizes[i],
+                                       (VOID **)&buffers[i]) != EFI_SUCCESS ||
+            buffers[i] == NULL || ((UINTN)buffers[i] & 7U)) {
+            goto out;
+        }
+        for (j = 0; j < i; j++) {
+            UINTN a = (UINTN)buffers[i];
+            UINTN b = (UINTN)buffers[j];
+
+            if (a < b + sizes[j] + 8U && b < a + sizes[i] + 8U) {
+                goto out;
+            }
+        }
+        BootServices->SetMem(buffers[i], sizes[i], 0xa5);
+    }
+    if (BootServices->FreePool(buffers[1]) != EFI_SUCCESS) {
+        goto out;
+    }
+    buffers[1] = NULL;
+    if (BootServices->AllocatePool(EfiLoaderData, sizes[1], &replacement) !=
+        EFI_SUCCESS) {
+        goto out;
+    }
+    BootServices->SetMem(replacement, sizes[1], 0x5a);
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        if (buffers[i] == NULL) {
+            continue;
+        }
+        if (buffers[i][0] != 0xa5 || buffers[i][sizes[i] - 1U] != 0xa5) {
+            goto out;
+        }
+        for (j = 0; j < 8U; j++) {
+            if (buffers[i][sizes[i] + j] != 0) {
+                goto out;
+            }
+        }
+    }
+    ok = 1;
+out:
+    if (replacement != NULL) {
+        (void)BootServices->FreePool(replacement);
+    }
+    for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        if (buffers[i] != NULL) {
+            (void)BootServices->FreePool(buffers[i]);
+        }
+    }
+    return ok;
+}
+
 static BOOLEAN test_memory_services(EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
@@ -703,7 +763,7 @@ static BOOLEAN test_memory_services(EFI_SYSTEM_TABLE *SystemTable)
         goto out;
     }
     pool = NULL;
-    ok = 1;
+    ok = test_pool_padding(bs);
 out:
     if (pool != NULL) {
         (void)bs->FreePool(pool);

@@ -34,6 +34,7 @@
 #define SAL_MEMORY_USAGE_RUNTIME_CODE 4U
 #define SAL_MEMORY_USAGE_RUNTIME_DATA 5U
 #define SAL_GET_STATE_INFO_SIZE       0x01000002ULL
+#define SAL_PCI_CONFIG_READ           0x01000010ULL
 #define SAL_STATE_INFO_MAX_SIZE       512U
 #define SAL_SUCCESS                   0ULL
 #define SAL_TABLE_LENGTH              0x170U
@@ -49,7 +50,8 @@
 #define ACPI_DSDT_SIGNATURE           0x54445344U
 #define ACPI_FADT_DSDT_OFFSET         40U
 #define ACPI_FADT_X_DSDT_OFFSET       140U
-#define I2000_DSDT_AML_SIZE           1186U
+#define ACPI_SPCR_SIGNATURE          0x52435053U
+#define ACPI_HCDP_SIGNATURE          0x50444348U
 
 typedef struct {
     UINT32 Signature;
@@ -447,7 +449,8 @@ static BOOLEAN acpi_dsdt_valid(const UINT8 *Fadt)
         return 0;
     }
     dsdt_length = get_u32(dsdt + 4U);
-    if (dsdt_length != ACPI_SDT_HEADER_SIZE + I2000_DSDT_AML_SIZE ||
+    if (dsdt_length <= ACPI_SDT_HEADER_SIZE ||
+        dsdt_length > ACPI_MAX_TABLE_SIZE ||
         ia64_checksum8(dsdt, dsdt_length) != 0) {
         return 0;
     }
@@ -466,6 +469,22 @@ static BOOLEAN acpi_dsdt_valid(const UINT8 *Fadt)
            pci1 != NULL && pci2 != NULL && pci3 != NULL && prt != NULL &&
            ifb0 > pci0 && ps2k > ifb0 && ps2m > ps2k &&
            pci1 > ps2m && pci2 > pci1 && prt > pci2 && pci3 > prt;
+}
+
+static BOOLEAN acpi_console_valid(EFI_SYSTEM_TABLE *SystemTable)
+{
+    const UINT8 *spcr = find_acpi_sdt(SystemTable, ACPI_SPCR_SIGNATURE);
+    const UINT8 *hcdp = find_acpi_sdt(SystemTable, ACPI_HCDP_SIGNATURE);
+
+    return spcr != NULL && get_u32(spcr + 4U) == 80U && spcr[8U] == 1U &&
+           spcr[36U] == 0 && spcr[40U] == 1U && spcr[41U] == 8U &&
+           get_u64(spcr + 44U) == 0x3f8U &&
+           spcr[52U] == 5U && spcr[53U] == 4U &&
+           get_u32(spcr + 54U) == 4U &&
+           get_u32(spcr + 64U) == 0xffffffffU &&
+           hcdp != NULL && get_u32(hcdp + 4U) >= 88U &&
+           get_u64(hcdp + 60U) == 0x3f8U &&
+           get_u32(hcdp + 72U) == 0 && (hcdp[81U] & 0x40U) == 0;
 }
 
 static BOOLEAN acpi_topology_valid(EFI_SYSTEM_TABLE *SystemTable)
@@ -650,6 +669,41 @@ static BOOLEAN sal_call_valid(const TEST_SAL_TABLE *Table)
            result.Value1 == 0 && result.Value2 == 0;
 }
 
+static BOOLEAN sal_chipset_config_valid(const TEST_SAL_TABLE *Table)
+{
+    static const struct {
+        UINT64 Address;
+        UINT64 Size;
+        UINT64 Value;
+    } reads[] = {
+        { 0x008040, 1, 4 },
+        { 0x008044, 1, 1 },
+        { 0x040000, 4, 0x84e08086 },
+        { 0x040070, 4, 0x00e20000 },
+        { 0x049048, 2, 0x0101 },
+        { 0x050000, 4, 0xffffffff },
+        { 0x01040000, 4, 0xffffffff },
+    };
+    /* Keep descriptor stores for the IA-64 indirect call sequence. */
+    volatile UINT64 descriptor[2] __attribute__((aligned(16)));
+    TEST_SAL_PROC procedure;
+    UINTN i;
+
+    descriptor[0] = Table->Entrypoint->SalProc;
+    descriptor[1] = Table->Entrypoint->SalGp;
+    procedure = (TEST_SAL_PROC)(UINTN)&descriptor[0];
+    for (i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+        TEST_SAL_RETURN result = procedure(
+            SAL_PCI_CONFIG_READ, reads[i].Address, reads[i].Size,
+            0, 0, 0, 0, 0);
+
+        if (result.Status != SAL_SUCCESS || result.Value0 != reads[i].Value) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     IA64_TEST_CONTEXT context = {
@@ -714,6 +768,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                     have_sal && sal_entrypoint_valid(&sal) &&
                         sal_call_valid(&sal),
                     EFI_DEVICE_ERROR, "get-state-info-size");
+    ia64_test_check(&context, "sal-chipset-config",
+                    have_sal && sal_entrypoint_valid(&sal) &&
+                        sal_chipset_config_valid(&sal),
+                    EFI_DEVICE_ERROR, "chipset-bus-configuration");
+    ia64_test_check(&context, "acpi-console",
+                    acpi_console_valid(SystemTable),
+                    EFI_DEVICE_ERROR, "uart-interrupt-routing");
     ia64_test_check(&context, "direct-alias", direct_alias_valid(),
                     EFI_DEVICE_ERROR, "region-seven-loader-alias");
     ia64_test_check(&context, "automatic-allocation",

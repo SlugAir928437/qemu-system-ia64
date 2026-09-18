@@ -17,7 +17,7 @@ from ia64.protocol import wait_for_suite
 
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
-    "root-device-path", "console-output",
+    "root-device-path", "console-output", "console-variables",
 }
 
 MPT_SMOKE_CASES = SMOKE_CASES | {"controller-device-path"}

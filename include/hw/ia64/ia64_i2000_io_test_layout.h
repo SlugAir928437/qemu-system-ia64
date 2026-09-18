@@ -225,6 +225,7 @@
     (IA64_I2000_IO_TEST_FEATURE_PIC |                       \
      IA64_I2000_IO_TEST_FEATURE_PIT |                       \
      IA64_I2000_IO_TEST_FEATURE_SUPERIO_CONFIG |            \
+     IA64_I2000_IO_TEST_FEATURE_SUPERIO_PARALLEL |          \
      IA64_I2000_IO_TEST_FEATURE_UART |                      \
      IA64_I2000_IO_TEST_FEATURE_I8042 |                     \
      IA64_I2000_IO_TEST_FEATURE_RTC_BANK0 |                 \
@@ -238,7 +239,6 @@
     (IA64_I2000_IO_TEST_FEATURE_IDE_SECONDARY |             \
      IA64_I2000_IO_TEST_FEATURE_IDE_SLAVE |                 \
      IA64_I2000_IO_TEST_FEATURE_IDE_BMDMA |                 \
-     IA64_I2000_IO_TEST_FEATURE_SUPERIO_PARALLEL |          \
      IA64_I2000_IO_TEST_FEATURE_SUPERIO_FLOPPY |            \
      IA64_I2000_IO_TEST_FEATURE_SUPERIO_ADDITIONAL_UART |   \
      IA64_I2000_IO_TEST_FEATURE_IFB_USB |                   \

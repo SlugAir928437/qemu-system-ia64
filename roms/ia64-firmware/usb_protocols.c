@@ -268,15 +268,12 @@ struct _EFI_USB_IO_PROTOCOL {
 #define USB_ENDPOINT_INTERRUPT   0x03U
 
 typedef struct {
-    FW_ACPI_HID_DEVICE_PATH_NODE Acpi;
-    FW_PCI_DEVICE_PATH_NODE Pci;
-    struct {
-        FW_DEVICE_PATH_NODE Header;
-        UINT8 ParentPortNumber;
-        UINT8 InterfaceNumber;
-    } __attribute__((packed)) Usb;
-    FW_DEVICE_PATH_NODE End;
-} __attribute__((packed)) FW_USB_DEVICE_PATH;
+    FW_DEVICE_PATH_NODE Header;
+    UINT8 ParentPortNumber;
+    UINT8 InterfaceNumber;
+} __attribute__((packed)) FW_USB_DEVICE_PATH_NODE;
+
+#define FW_USB_DEVICE_PATH_MAX 128U
 
 typedef struct {
     BOOLEAN in_use;
@@ -328,7 +325,7 @@ typedef struct {
     EFI_USB_ENDPOINT_DESCRIPTOR endpoint[FW_USB_ENDPOINT_MAX];
     UINT16 languages[FW_USB_LANGUAGE_MAX];
     UINT16 language_size;
-    FW_USB_DEVICE_PATH device_path;
+    UINT8 device_path[FW_USB_DEVICE_PATH_MAX];
 } FW_USB_IO_DEVICE;
 
 static const UINT8 mUsbHcProtocolGuid[16] = {
@@ -1909,14 +1906,45 @@ static VOID usb_protocol_initialize_interfaces(VOID)
     mUsbIoDevice.protocol.UsbPortReset = usb_io_port_reset;
 }
 
+static BOOLEAN usb_keyboard_device_path_init(UINT8 port, UINT8 interface)
+{
+    FW_USB_DEVICE_PATH_NODE usb_path;
+    FW_DEVICE_PATH_NODE end = { 0x7f, 0xff, sizeof(end) };
+    UINTN path_size;
+
+    path_size = fw_usb_controller_device_path(
+        mUsbIoDevice.device_path,
+        sizeof(mUsbIoDevice.device_path) - sizeof(usb_path));
+    if (path_size < sizeof(end)) {
+        return 0;
+    }
+    usb_path.Header.Type = 0x03;
+    usb_path.Header.SubType = 0x05;
+    usb_path.Header.Length = sizeof(usb_path);
+    usb_path.ParentPortNumber = port;
+    usb_path.InterfaceNumber = interface;
+    fw_copy_mem(mUsbIoDevice.device_path + path_size - sizeof(end),
+                &usb_path, sizeof(usb_path));
+    fw_copy_mem(mUsbIoDevice.device_path + path_size - sizeof(end) +
+                sizeof(usb_path), &end, sizeof(end));
+    return 1;
+}
+
 BOOLEAN fw_usb_protocols_install(VOID)
 {
     EFI_HANDLE controller = fw_usb_controller_handle();
     EFI_STATUS status;
 
     if (controller == NULL || !usb_ohci_controller_present()) {
-        (void)usb_keyboard_init();
-        return 1;
+        if (!usb_keyboard_init()) {
+            return 1;
+        }
+        if (!usb_keyboard_device_path_init(mUsbKeyboardPort, 0)) {
+            return 0;
+        }
+        return bs_install_protocol(&mUsbIoDevice.handle,
+                                    (VOID *)mDevicePathProtocolGuid, 0,
+                                    mUsbIoDevice.device_path) == EFI_SUCCESS;
     }
     usb_protocol_initialize_interfaces();
     status = bs_install_protocol(&controller, (VOID *)mUsbHcProtocolGuid,
@@ -1927,17 +1955,13 @@ BOOLEAN fw_usb_protocols_install(VOID)
     if (!usb_keyboard_init() || !usb_io_cache_descriptors()) {
         return 1;
     }
-
-    fw_usb_controller_device_path(&mUsbIoDevice.device_path.Acpi,
-                                  &mUsbIoDevice.device_path.Pci,
-                                  &mUsbIoDevice.device_path.End);
-    mUsbIoDevice.device_path.Usb.Header.Type = 0x03;
-    mUsbIoDevice.device_path.Usb.Header.SubType = 0x05;
-    mUsbIoDevice.device_path.Usb.Header.Length =
-        sizeof(mUsbIoDevice.device_path.Usb);
-    mUsbIoDevice.device_path.Usb.ParentPortNumber = mUsbIoDevice.port;
-    mUsbIoDevice.device_path.Usb.InterfaceNumber =
-        mUsbIoDevice.interface_number;
+    if (!usb_keyboard_device_path_init(mUsbIoDevice.port,
+                                       mUsbIoDevice.interface_number)) {
+        (void)bs_uninstall_protocol(controller,
+                                    (VOID *)mUsbHcProtocolGuid,
+                                    &mUsbHcProtocol);
+        return 0;
+    }
     mUsbIoDevice.handle = NULL;
     status = bs_install_protocol(&mUsbIoDevice.handle,
                                  (VOID *)mUsbIoProtocolGuid, 0,
@@ -1945,7 +1969,7 @@ BOOLEAN fw_usb_protocols_install(VOID)
     if (status == EFI_SUCCESS) {
         status = bs_install_protocol(&mUsbIoDevice.handle,
                                      (VOID *)mDevicePathProtocolGuid, 0,
-                                     &mUsbIoDevice.device_path);
+                                     mUsbIoDevice.device_path);
     }
     if (status != EFI_SUCCESS) {
         if (mUsbIoDevice.handle != NULL) {
@@ -1960,4 +1984,9 @@ BOOLEAN fw_usb_protocols_install(VOID)
         return 0;
     }
     return 1;
+}
+
+EFI_HANDLE fw_usb_keyboard_handle(VOID)
+{
+    return mUsbIoDevice.handle;
 }

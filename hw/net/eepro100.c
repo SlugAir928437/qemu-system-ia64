@@ -194,6 +194,15 @@ typedef struct {
     /* Ethernet frame data follows. */
 } eepro100_rx_t;
 
+typedef struct {
+    uint16_t count;
+    uint16_t reserved1;
+    uint32_t link;
+    uint32_t buffer;
+    uint16_t size;
+    uint16_t reserved2;
+} eepro100_rbd_t;
+
 typedef enum {
     COMMAND_EL = BIT(15),
     COMMAND_S = BIT(14),
@@ -207,6 +216,12 @@ typedef enum {
     STATUS_C = BIT(15),
     STATUS_OK = BIT(13),
 } scb_status_bit;
+
+enum {
+    RFD_SIZE_MASK = BITS(13, 0),
+    RFD_COUNT_F = BIT(14),
+    RFD_COUNT_EOF = BIT(15),
+};
 
 typedef struct {
     uint32_t tx_good_frames, tx_max_collisions, tx_late_collisions,
@@ -769,11 +784,6 @@ enum commands {
     CmdTxFlex = 0x0008,         /* Use "Flexible mode" for CmdTx command. */
 };
 
-static cu_state_t get_cu_state(EEPRO100State * s)
-{
-    return ((s->mem[SCBStatus] & BITS(7, 6)) >> 6);
-}
-
 static void set_cu_state(EEPRO100State * s, cu_state_t state)
 {
     s->mem[SCBStatus] = (s->mem[SCBStatus] & ~BITS(7, 6)) + (state << 6);
@@ -801,21 +811,6 @@ static bool eepro100_cu_all_idle(EEPRO100State *s)
 {
     return s->cu_lp.state == cu_queue_idle &&
            s->cu_hp.state == cu_queue_idle;
-}
-
-static void eepro100_cu_consume_legacy_alias(EEPRO100State *s,
-                                             cu_queue_t queue)
-{
-    E100CUContext *context = eepro100_cu_context(s, queue);
-    E100CUContext *other = eepro100_cu_other_context(s, queue);
-
-    /* Legacy streams alias one saved offset to both queue contexts. */
-    if (context->state == cu_queue_suspended &&
-        other->state == cu_queue_suspended &&
-        !context->last_valid && !other->last_valid &&
-        context->next_offset == other->next_offset) {
-        memset(other, 0, sizeof(*other));
-    }
 }
 
 static void eepro100_cu_sync_status(EEPRO100State *s)
@@ -1172,7 +1167,6 @@ static void eepro100_cu_start(EEPRO100State *s, cu_queue_t queue)
 {
     E100CUContext *context = eepro100_cu_context(s, queue);
 
-    eepro100_cu_consume_legacy_alias(s, queue);
     if (eepro100_cu_any_active(s)) {
         /* CU Start while either queue is active is prohibited. */
         logout("CU start while a queue is active\n");
@@ -1198,7 +1192,7 @@ static bool eepro100_cu_resume_allowed(EEPRO100State *s,
     MemTxResult result;
 
     if (!context->last_valid) {
-        /* Legacy migration streams omit the previous command block. */
+        /* A DMA failure can leave the queue active before its first command. */
         return true;
     }
 
@@ -1222,7 +1216,6 @@ static void eepro100_cu_resume(EEPRO100State *s, cu_queue_t queue)
     if (context->state == cu_queue_idle) {
         return;
     }
-    eepro100_cu_consume_legacy_alias(s, queue);
     if (other->state == cu_queue_active) {
         logout("CU resume while the other queue is active\n");
         return;
@@ -1997,6 +1990,50 @@ static const MemoryRegionOps eepro100_flash_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static size_t eepro100_receive_rbds(EEPRO100State *s, uint32_t *rbd_addr,
+                                  const uint8_t *buf, size_t size,
+                                  GArray *used_rbds)
+{
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    size_t copied = 0;
+    uint32_t last_rbd = UINT32_MAX;
+    uint16_t count = 0;
+
+    while (copied < size && *rbd_addr != UINT32_MAX) {
+        eepro100_rbd_t rbd;
+        uint16_t capacity;
+        uint32_t next;
+        size_t length;
+
+        if (pci_dma_read(&s->dev, *rbd_addr, &rbd, sizeof(rbd)) != MEMTX_OK) {
+            break;
+        }
+        capacity = le16_to_cpu(rbd.size) & RFD_SIZE_MASK;
+        if (!capacity || (le16_to_cpu(rbd.count) & RFD_COUNT_F)) {
+            break;
+        }
+        next = le16_to_cpu(rbd.size) & COMMAND_EL ?
+               UINT32_MAX : le32_to_cpu(rbd.link);
+        length = MIN(size - copied, capacity);
+        if (pci_dma_write(&s->dev, le32_to_cpu(rbd.buffer), buf + copied,
+                          length) != MEMTX_OK) {
+            break;
+        }
+        copied += length;
+        last_rbd = *rbd_addr;
+        g_array_append_val(used_rbds, last_rbd);
+        count = length | RFD_COUNT_F;
+        stw_le_pci_dma(&s->dev, *rbd_addr + offsetof(eepro100_rbd_t, count),
+                      count, attrs);
+        *rbd_addr = next;
+    }
+    if (last_rbd != UINT32_MAX) {
+        stw_le_pci_dma(&s->dev, last_rbd + offsetof(eepro100_rbd_t, count),
+                      count | RFD_COUNT_EOF, attrs);
+    }
+    return copied;
+}
+
 static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 {
     /* TODO:
@@ -2006,8 +2043,11 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
     const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
     EEPRO100State *s = qemu_get_nic_opaque(nc);
     uint16_t rfd_status = 0xa000;
+    uint16_t type_length;
+    bool type_frame;
     size_t input_size = size;
     g_autofree uint8_t *received = NULL;
+    g_autoptr(GArray) used_rbds = NULL;
 #if defined(CONFIG_PAD_RECEIVED_FRAMES)
     uint8_t min_buf[60];
 #endif
@@ -2028,6 +2068,11 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         s->statistics.rx_short_frame_errors++;
         return size;
     }
+    type_length = lduw_be_p(buf + 12);
+    type_frame = type_length == 0 || type_length > ETH_MTU;
+    if (type_frame) {
+        rfd_status |= BIT(5);
+    }
     if (s->configuration[8] & 0x80) {
         /* CSMA is disabled. */
         logout("%p received while CSMA is disabled\n", s);
@@ -2045,7 +2090,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
          * Long frames are discarded. */
         logout("%p received long frame (%zu byte), ignored\n", s, size);
         return -1;
-    } else if (memcmp(buf, s->conf.macaddr.a, 6) == 0) {       /* !!! */
+    } else if (memcmp(buf, s->conf.macaddr.a, 6) == 0) {
         /* Frame matches individual address. */
         /* TODO: check configuration byte 15/4 (ignore U/L). */
         TRACE(RXTX, logout("%p received frame for me, len=%zu\n", s, size));
@@ -2113,13 +2158,11 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         received = g_malloc0(wire_size + 4);
         memcpy(received, buf, size);
         fcs = ~net_crc32_le(received, wire_size);
-        /* Strip 802.3 padding; Ethernet II has a type, not a length. */
-        if ((s->configuration[18] & BIT(0)) && size >= 14) {
-            uint16_t length = lduw_be_p(buf + 12);
-
-            if (length <= 1500 && length <= size - 14) {
-                payload_size = 14 + length;
-            }
+        /* CRC transfer disables padding stripping, including for 802.3. */
+        if ((s->configuration[18] & (BIT(0) | BIT(2))) == BIT(0) &&
+            !type_frame &&
+            type_length <= size - ETH_HLEN) {
+            payload_size = ETH_HLEN + type_length;
         }
         if (s->configuration[18] & BIT(2)) {
             stl_le_p(received + payload_size, fcs);
@@ -2128,18 +2171,20 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         buf = received;
         size = payload_size;
     }
-    /* !!! */
     eepro100_rx_t rx;
     pci_dma_read(&s->dev, s->ru_base + s->ru_offset,
                  &rx, sizeof(eepro100_rx_t));
     uint16_t rfd_command = le16_to_cpu(rx.command);
-    uint16_t rfd_size = le16_to_cpu(rx.size);
+    uint16_t rfd_size = le16_to_cpu(rx.size) & RFD_SIZE_MASK;
+    uint32_t rbd_addr = le32_to_cpu(rx.rx_buf_addr);
+    size_t copied = MIN(size, rfd_size);
+    bool rbd_no_resources = false;
+    bool discard;
 
-    if (size > rfd_size) {
-        logout("Receive buffer (%" PRId16 " bytes) too small for data "
-            "(%zu bytes); data truncated\n", rfd_size, size);
-        size = rfd_size;
-    }
+    trace_eepro100_receive(s->ru_base + s->ru_offset, rfd_command,
+                          le32_to_cpu(rx.rx_buf_addr), rfd_size, size,
+                          rfd_status, s->configuration[18]);
+
 #if !defined(CONFIG_PAD_RECEIVED_FRAMES)
     if (input_size < 60) {
         rfd_status |= 0x0080;
@@ -2147,27 +2192,55 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 #endif
     TRACE(OTHER, logout("command 0x%04x, link 0x%08x, addr 0x%08x, size %u\n",
           rfd_command, rx.link, rx.rx_buf_addr, rfd_size));
+    pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
+                  sizeof(eepro100_rx_t), buf, copied);
+    if (rfd_command & COMMAND_SF) {
+        used_rbds = g_array_new(false, false, sizeof(uint32_t));
+        copied += eepro100_receive_rbds(s, &rbd_addr, buf + copied,
+                                       size - copied, used_rbds);
+        rbd_no_resources = copied < size;
+    }
+    if (copied < size) {
+        rfd_status = (rfd_status & ~STATUS_OK) | BIT(9);
+        s->statistics.rx_resource_errors++;
+    } else if (rfd_status & STATUS_OK) {
+        s->statistics.rx_good_frames++;
+    }
+    discard = !(rfd_status & STATUS_OK) &&
+              !(s->configuration[6] & BIT(7));
+    if (discard) {
+        /* Reclaim only this frame's RBDs and retain the current RFD. */
+        if (used_rbds) {
+            for (unsigned i = 0; i < used_rbds->len; i++) {
+                uint32_t addr = g_array_index(used_rbds, uint32_t, i);
+
+                stw_le_pci_dma(&s->dev, addr +
+                              offsetof(eepro100_rbd_t, count), 0, attrs);
+            }
+        }
+        goto receive_complete;
+    }
+    if ((rfd_command & COMMAND_SF) && le32_to_cpu(rx.link) != UINT32_MAX) {
+        stl_le_pci_dma(&s->dev, s->ru_base + le32_to_cpu(rx.link) +
+                      offsetof(eepro100_rx_t, rx_buf_addr), rbd_addr, attrs);
+    }
     stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
-                offsetof(eepro100_rx_t, status), rfd_status, attrs);
+                  offsetof(eepro100_rx_t, count),
+                  copied | RFD_COUNT_F | RFD_COUNT_EOF, attrs);
     stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
-                offsetof(eepro100_rx_t, count), size, attrs);
+                  offsetof(eepro100_rx_t, status), rfd_status, attrs);
     /* Early receive interrupt not supported. */
 #if 0
     eepro100_er_interrupt(s);
 #endif
-    pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
-                  sizeof(eepro100_rx_t), buf, size);
-    s->statistics.rx_good_frames++;
     eepro100_fr_interrupt(s);
     s->ru_offset = le32_to_cpu(rx.link);
-    if (rfd_command & COMMAND_EL) {
-        /* EL bit is set, so this was the last frame. */
-        logout("receive: Running out of frames\n");
+
+receive_complete:
+    if (rbd_no_resources || (!discard && (rfd_command & COMMAND_EL))) {
         set_ru_state(s, ru_no_resources);
         eepro100_rnr_interrupt(s);
-    }
-    if (rfd_command & COMMAND_S) {
-        /* S bit is set. */
+    } else if (!discard && (rfd_command & COMMAND_S)) {
         set_ru_state(s, ru_suspended);
     }
     return input_size;
@@ -2185,48 +2258,11 @@ static int eepro100_post_load(void *opaque, int version_id)
     EEPRO100State *s = opaque;
     E100PCIDeviceInfo *info = eepro100_get_class(s);
 
-    if (version_id < 4) {
-        cu_state_t legacy_state = get_cu_state(s);
-
-        s->cu_hp.next_offset = s->cu_lp.next_offset;
-        s->cu_lp.last_offset = 0;
-        s->cu_hp.last_offset = 0;
-        s->cu_lp.last_valid = false;
-        s->cu_hp.last_valid = false;
-        switch (legacy_state) {
-        case cu_idle:
-            s->cu_lp.state = cu_queue_idle;
-            s->cu_hp.state = cu_queue_idle;
-            break;
-        case cu_suspended:
-            /* Legacy streams do not identify which queue was suspended. */
-            s->cu_lp.state = cu_queue_suspended;
-            s->cu_hp.state = info->has_priority_queues ?
-                             cu_queue_suspended : cu_queue_idle;
-            break;
-        case cu_lpq_active:
-            s->cu_lp.state = cu_queue_active;
-            s->cu_hp.state = cu_queue_idle;
-            break;
-        case cu_hqp_active:
-            if (info->has_priority_queues) {
-                s->cu_lp.state = cu_queue_idle;
-                s->cu_hp.state = cu_queue_active;
-            } else {
-                /* Version < 4 streams can encode HPQ-active i82557 state. */
-                s->cu_lp.state = cu_queue_active;
-                s->cu_hp.state = cu_queue_idle;
-            }
-            break;
-        default:
-            g_assert_not_reached();
-        }
-    } else if (s->cu_lp.state > cu_queue_active ||
-               s->cu_hp.state > cu_queue_active ||
-               (s->cu_lp.state == cu_queue_active &&
-                s->cu_hp.state == cu_queue_active) ||
-               (!info->has_priority_queues &&
-                s->cu_hp.state != cu_queue_idle)) {
+    if (s->cu_lp.state > cu_queue_active ||
+        s->cu_hp.state > cu_queue_active ||
+        (s->cu_lp.state == cu_queue_active &&
+         s->cu_hp.state == cu_queue_active) ||
+        (!info->has_priority_queues && s->cu_hp.state != cu_queue_idle)) {
         return -EINVAL;
     }
     eepro100_cu_sync_status(s);
@@ -2243,27 +2279,23 @@ static const VMStateDescription vmstate_eepro100 = {
     .post_load = eepro100_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, EEPRO100State),
-        VMSTATE_UNUSED(32),
         VMSTATE_BUFFER(mult, EEPRO100State),
         VMSTATE_BUFFER(mem, EEPRO100State),
-        /* Save all members of struct between scb_stat and mem. */
         VMSTATE_UINT8(scb_stat, EEPRO100State),
         VMSTATE_UINT8(int_stat, EEPRO100State),
-        VMSTATE_UNUSED(3*4),
         VMSTATE_MACADDR(conf.macaddr, EEPRO100State),
-        VMSTATE_UNUSED(19*4),
         VMSTATE_UINT16_ARRAY(mdimem, EEPRO100State, 32),
         /* The eeprom should be saved and restored by its own routines. */
         VMSTATE_UINT32_EQUAL(device, EEPRO100State),
         VMSTATE_UINT32(cu_base, EEPRO100State),
         VMSTATE_UINT32(cu_lp.next_offset, EEPRO100State),
-        VMSTATE_UINT32_V(cu_hp.next_offset, EEPRO100State, 4),
-        VMSTATE_UINT32_V(cu_lp.last_offset, EEPRO100State, 4),
-        VMSTATE_UINT32_V(cu_hp.last_offset, EEPRO100State, 4),
-        VMSTATE_UINT8_V(cu_lp.state, EEPRO100State, 4),
-        VMSTATE_UINT8_V(cu_hp.state, EEPRO100State, 4),
-        VMSTATE_BOOL_V(cu_lp.last_valid, EEPRO100State, 4),
-        VMSTATE_BOOL_V(cu_hp.last_valid, EEPRO100State, 4),
+        VMSTATE_UINT32(cu_hp.next_offset, EEPRO100State),
+        VMSTATE_UINT32(cu_lp.last_offset, EEPRO100State),
+        VMSTATE_UINT32(cu_hp.last_offset, EEPRO100State),
+        VMSTATE_UINT8(cu_lp.state, EEPRO100State),
+        VMSTATE_UINT8(cu_hp.state, EEPRO100State),
+        VMSTATE_BOOL(cu_lp.last_valid, EEPRO100State),
+        VMSTATE_BOOL(cu_hp.last_valid, EEPRO100State),
         VMSTATE_UINT32(ru_base, EEPRO100State),
         VMSTATE_UINT32(ru_offset, EEPRO100State),
         VMSTATE_UINT32(statsaddr, EEPRO100State),

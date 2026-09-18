@@ -155,6 +155,60 @@ static MPIMsgConfigReply mptspi_config(QMptSpi *mpt, uint8_t action,
     return reply;
 }
 
+static void mptspi_test_io_unit_policy(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QMptSpi *mpt = obj;
+    uint8_t page[8];
+    uint64_t pa = guest_alloc(alloc, sizeof(page));
+    MPIMsgConfigReply reply;
+    uint32_t flags;
+    const uint8_t actions[][2] = {
+        { MPI_CONFIG_ACTION_PAGE_WRITE_CURRENT,
+          MPI_CONFIG_ACTION_PAGE_READ_CURRENT },
+        { MPI_CONFIG_ACTION_PAGE_WRITE_NVRAM,
+          MPI_CONFIG_ACTION_PAGE_READ_NVRAM },
+    };
+    unsigned i;
+
+    mptspi_ioc_init(mpt);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_READ_CURRENT,
+                          MPI_CONFIG_PAGETYPE_IO_UNIT, 1, 0,
+                          pa, sizeof(page), false);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==, MPI_IOCSTATUS_SUCCESS);
+    qtest_memread(mpt->dev.bus->qts, pa, page, sizeof(page));
+
+    /* Static volume ID policy is valid without RAID volumes. */
+    flags = ldl_le_p(page + 4) | MPI_IOUNITPAGE1_IR_USE_STATIC_VOLUME_ID;
+    for (i = 0; i < G_N_ELEMENTS(actions); i++) {
+        stl_le_p(page + 4, flags);
+        qtest_memwrite(mpt->dev.bus->qts, pa, page, sizeof(page));
+        reply = mptspi_config(mpt, actions[i][0],
+                              MPI_CONFIG_PAGETYPE_IO_UNIT, 1, 0,
+                              pa, sizeof(page), true);
+        g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                        MPI_IOCSTATUS_SUCCESS);
+        qtest_memset(mpt->dev.bus->qts, pa, 0, sizeof(page));
+        reply = mptspi_config(mpt, actions[i][1],
+                              MPI_CONFIG_PAGETYPE_IO_UNIT, 1, 0,
+                              pa, sizeof(page), false);
+        g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                        MPI_IOCSTATUS_SUCCESS);
+        qtest_memread(mpt->dev.bus->qts, pa, page, sizeof(page));
+        g_assert_cmphex(ldl_le_p(page + 4), ==, flags);
+    }
+
+    /* The policy must not make the controller's function layout writable. */
+    stl_le_p(page + 4, flags ^ MPI_IOUNITPAGE1_SINGLE_FUNCTION);
+    qtest_memwrite(mpt->dev.bus->qts, pa, page, sizeof(page));
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_WRITE_CURRENT,
+                          MPI_CONFIG_PAGETYPE_IO_UNIT, 1, 0,
+                          pa, sizeof(page), true);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                    MPI_IOCSTATUS_CONFIG_INVALID_DATA);
+    guest_free(alloc, pa);
+}
+
 static void mptspi_test_facts(void *obj, void *data,
                               QGuestAllocator *alloc)
 {
@@ -1216,6 +1270,8 @@ static void mptspi_register_nodes(void)
     qos_node_consumes("lsi53c1030", "ia64-pci-bus", &ia64_opts);
     qos_node_produces("lsi53c1030", "pci-device");
     qos_add_test("facts", "lsi53c1030", mptspi_test_facts, NULL);
+    qos_add_test("io-unit-policy", "lsi53c1030", mptspi_test_io_unit_policy,
+                 NULL);
     qos_add_test("doorbell-msi", "lsi53c1030", mptspi_doorbell_msi, &msi_opts);
     qos_add_test("reply-coalescing", "lsi53c1030",
                  mptspi_reply_coalescing, NULL);
@@ -1232,6 +1288,8 @@ static void mptspi_register_nodes(void)
     qos_node_consumes("mptsas1068", "ia64-pci-bus", &sas_opts);
     qos_node_produces("mptsas1068", "pci-device");
     qos_add_test("compat", "mptsas1068", mptsas1068_test_compat, NULL);
+    qos_add_test("io-unit-policy", "mptsas1068", mptspi_test_io_unit_policy,
+                 NULL);
     qos_add_test("doorbell-msi", "mptsas1068", mptspi_doorbell_msi, &msi_opts);
     qos_add_test("reply-coalescing", "mptsas1068",
                  mptspi_reply_coalescing, NULL);

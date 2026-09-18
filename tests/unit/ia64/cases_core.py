@@ -2860,6 +2860,45 @@ test_br_cloop_decrements_lc = require_registers("br_cloop_decrements_lc", [
      br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "r4": 3, "r5": 0}, entry=0x10)
 
+
+def _br_cloop_following_self_loops(name, *, ic, lc):
+    return require_registers(name, [
+        (0x10, 0x00, ssm(IA64_PSR_IC) if ic else rsm(IA64_PSR_IC),
+         nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x11, nop_m(), nop_i(), br_cond(0x30, 0x100)),
+        (0x100, 0x00, nop_m(), addl(3, 0x4000, 0), addl(8, 0x4000, 0)),
+        (0x110, 0x00, nop_m(), mov_lc_imm(lc), adds(4, 0x5a, 0)),
+        (0x120, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x130, 0x11, nop_m(), nop_i(), br_cloop(0x130, 0x180)),
+        (0x140, 0x19, st8_postinc(3, 4, 8), nop_m(),
+         br_cloop(0x140, 0x140)),
+        (0x150, 0x00, nop_m(), mov_lc_imm(2), nop_i()),
+        (0x160, 0x19, st8_postinc(3, 4, 8), nop_m(),
+         br_cloop(0x160, 0x160)),
+        (0x170, 0x11, nop_m(), nop_i(), br_cond(0x170, 0x180)),
+        (0x180, 0x00, ld8(6, 8), mov_ar_lc(5), nop_i()),
+        (0x190, 0x11, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+        raw_bundle(0x4000, 0, 0),
+    ], {
+        "ip": 0x190,
+        "r3": 0x4000 if lc else 0x4020,
+        "r5": lc - 1 if lc else 0,
+        "r6": 0 if lc else 0x5a,
+        "exception": IA64_EXCP_NONE,
+    }, cpu="merced")
+
+
+test_br_cloop_skips_self_loops_ic0 = _br_cloop_following_self_loops(
+    "br_cloop_skips_self_loops_ic0", ic=False, lc=3)
+test_br_cloop_skips_self_loops_ic1 = _br_cloop_following_self_loops(
+    "br_cloop_skips_self_loops_ic1", ic=True, lc=3)
+test_br_cloop_reaches_self_loops_ic0 = _br_cloop_following_self_loops(
+    "br_cloop_reaches_self_loops_ic0", ic=False, lc=0)
+test_br_cloop_reaches_self_loops_ic1 = _br_cloop_following_self_loops(
+    "br_cloop_reaches_self_loops_ic1", ic=True, lc=0)
+
+
 test_br_ctop_rotating_pipeline = require_registers("br_ctop_rotating_pipeline", [
     (0x10, 0x00, alloc_m(9, 35, 35, 4, 0),
      mov_i_imm_ar(66, 25), mov_lc_imm(0)),
@@ -3285,6 +3324,40 @@ test_mux1_brcst_decode = require_registers("mux1_brcst_decode", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+def test_mux1_permutations_in_place(qemu):
+    for mode, expected in (
+            (0, 0xefefefefefefefef),
+            (8, 0x018945cd23ab67ef),
+            (9, 0x018923ab45cd67ef),
+            (10, 0x014589cd2367abef),
+            (11, 0xefcdab8967452301)):
+        require_registers(f"mux1_in_place_{mode}", [
+            (0x10, *movl_mlx(3, 0x0123456789abcdef)),
+            (0x20, 0x02, nop_m(), mux1(3, 3, mode), nop_i()),
+            (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+        ], {"ip": 0x30, "r3": expected,
+            "exception": IA64_EXCP_NONE}, entry=0x10)(qemu)
+
+
+def test_unpack_source_aliases(qemu):
+    for encode, expected in (
+            (unpack1_l, 0x55ee66ff77008811),
+            (unpack1_h, 0x11aa22bb33cc44dd),
+            (unpack2_l, 0x5566eeff77880011),
+            (unpack2_h, 0x1122aabb3344ccdd),
+            (unpack4_l, 0x55667788eeff0011),
+            (unpack4_h, 0x11223344aabbccdd)):
+        for destination in (2, 3):
+            require_registers(f"{encode.__name__}_alias_{destination}", [
+                (0x10, *movl_mlx(2, 0x1122334455667788)),
+                (0x20, *movl_mlx(3, 0xaabbccddeeff0011)),
+                (0x30, 0x02, nop_m(), adds(4, 0x55, 0), nop_i()),
+                (0x40, 0x02, nop_m(), encode(4, 2, 3, qp=1), nop_i()),
+                (0x50, 0x02, nop_m(), encode(destination, 2, 3), nop_i()),
+                (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+            ], {"ip": 0x60, f"r{destination}": expected, "r4": 0x55,
+                "exception": IA64_EXCP_NONE}, entry=0x10)(qemu)
+
 test_mux1_reserved_mbtype_predicated_off_is_nop = require_registers(
     "mux1_reserved_mbtype_predicated_off_is_nop", [
         (0x10, 0x00, nop_m(), adds(5, 0x44, 0), nop_i()),
@@ -3493,6 +3566,21 @@ test_predicate_register_roundtrip = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+test_predicate_sparse_write_preserves_other_bits = require_registers(
+    "predicate_sparse_write_preserves_other_bits", [
+        (0x10, *movl_mlx(2, 0x10080)),
+        (0x20, 0x01, nop_m(), mov_gr_pr(2, -2), nop_i()),
+        (0x30, *movl_mlx(2, 0x8202)),
+        (0x40, 0x01, nop_m(), mov_gr_pr(2, 0x8206), nop_i()),
+        (0x50, 0x01, nop_m(), mov_pr_gr(4), nop_i()),
+        (0x60, 0x01, nop_m(), mov_gr_pr(0, 0x8002, qp=1), nop_i()),
+        (0x70, 0x01, nop_m(), adds(5, 1, 0, qp=1), nop_i()),
+        (0x80, 0x01, nop_m(), mov_gr_pr(2, 0x206, qp=1), nop_i()),
+        (0x90, 0x01, nop_m(), mov_pr_gr(6), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {"ip": 0xa0, "r4": 0x18283, "r5": 0, "r6": 0x10281,
+        "pr_mask": 0x10281, "exception": IA64_EXCP_NONE}, entry=0x10)
+
 def test_packed_immediate_shift_boundaries(qemu):
     """Exercise every count, with in-place results and signed lanes."""
     word = 0x80017fff80000001
@@ -3541,7 +3629,11 @@ CASE_NAMES = (
     'br_call_ret_strcpy_pipeline_stops_on_first_zero_word',
     'br_counted_low6_constant_zero_violation',
     'br_cloop_decrements_lc',
+    'br_cloop_reaches_self_loops_ic0',
+    'br_cloop_reaches_self_loops_ic1',
     'br_cloop_requires_slot2',
+    'br_cloop_skips_self_loops_ic0',
+    'br_cloop_skips_self_loops_ic1',
     'br_ctop_long_rotating_pipeline',
     'br_ctop_many_decode',
     'br_ctop_rotating_pipeline',
@@ -3682,6 +3774,7 @@ CASE_NAMES = (
     'mpyshl4_decode',
     'mpyshl4_unsupported_true_illegal',
     'mux1_brcst_decode',
+    'mux1_permutations_in_place',
     'mux1_rev_decode',
     'mux1_reserved_mbtype_predicated_off_is_nop',
     'mux1_reserved_mbtype_true_illegal',
@@ -3718,6 +3811,7 @@ CASE_NAMES = (
     'popcnt_size_selector_predicated_off_is_nop',
     'popcnt_size_selector_true_illegal',
     'predicate_register_roundtrip',
+    'predicate_sparse_write_preserves_other_bits',
     'predicated_off_privileged_instruction_does_not_fault',
     'private_extension_opcode_illegal',
     'privileged_instruction_rejected_at_cpl3',
@@ -3765,6 +3859,7 @@ CASE_NAMES = (
     'tf_unc_same_pred_pred_false_illegal',
     'tf_upper_cpuid_feature_bits',
     'unpack2_l_decode',
+    'unpack_source_aliases',
     'vmsw0_madison_illegal_operation',
     'vmsw0_montecito_virtualization_fault',
     'vmsw1_madison_illegal_operation',

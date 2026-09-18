@@ -5,6 +5,7 @@
  */
 
 #include "fw-acpi-aml.h"
+#include "dsdt-i2000.h"
 #include "ssdt-platform-devices.h"
 
 #define CHECK(condition) do { if (!(condition)) { return 1; } } while (0)
@@ -274,6 +275,55 @@ static BOOLEAN prt_entry(const UINT8 *aml, UINTN aml_size,
         return 0;
     }
     return 1;
+}
+
+static int test_i2000_prt_routes(void)
+{
+    static const UINT8 route_counts[] = { 3, 1, 0, 1 };
+    static const UINT64 routes[][4] = {
+        { 0x0004ffffU, 0, 0, 16 },
+        { 0x0005ffffU, 0, 0, 16 },
+        { 0x0003ffffU, 3, 0, 19 },
+        { 0x0000ffffU, 0, 0, 20 },
+        { 0x0000ffffU, 0, 0, 28 },
+    };
+    const UINT8 *aml = mI2000DsdtAmlTemplate;
+    UINTN length = sizeof(mI2000DsdtAmlTemplate);
+    UINTN offset = 0;
+    UINTN encoding;
+    UINTN size;
+    UINTN outer_end;
+    UINTN inner_end;
+    UINTN root;
+    UINTN entry;
+    UINTN field;
+    UINTN route = 0;
+    UINT64 value;
+
+    for (root = 0; root < FW_ARRAY_SIZE(route_counts); root++) {
+        offset = find_name(aml, length, "_PRT", offset);
+        CHECK(offset < length && aml[offset++] == 0x12U);
+        CHECK(pkg_length(aml, length, offset, &encoding, &size));
+        outer_end = offset + size;
+        offset += encoding;
+        CHECK(offset < outer_end && aml[offset++] == route_counts[root]);
+        for (entry = 0; entry < route_counts[root]; entry++, route++) {
+            CHECK(offset < outer_end && aml[offset++] == 0x12U);
+            CHECK(pkg_length(aml, outer_end, offset, &encoding, &size));
+            inner_end = offset + size;
+            offset += encoding;
+            CHECK(offset < inner_end && aml[offset++] == 4U);
+            for (field = 0; field < 4U; field++) {
+                CHECK(aml_integer(aml, inner_end, &offset, &value) &&
+                      value == routes[route][field]);
+            }
+            CHECK(offset == inner_end);
+        }
+        CHECK(offset == outer_end);
+    }
+    CHECK(route == FW_ARRAY_SIZE(routes));
+    CHECK(find_name(aml, length, "_PRT", offset) == ~(UINTN)0);
+    return 0;
 }
 
 static int test_named_objects(void)
@@ -887,6 +937,7 @@ static int test_failure_paths(void)
 int main(void)
 {
     return test_ssdt_legacy_device_parent() || test_named_objects() ||
+        test_i2000_prt_routes() ||
         test_pkg_length_compaction() ||
         test_large_pkg_lengths() || test_resource_descriptors() ||
         test_zx6000_namespace() || test_optional_root_apertures() ||

@@ -412,6 +412,7 @@ struct MachineState {
     bool mem_merge;
     bool usb;
     bool usb_disabled;
+    bool usb1;
     char *firmware;
     bool iommu;
     bool suppress_vmdesc;

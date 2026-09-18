@@ -160,6 +160,36 @@ static void test_data_unknown(void)
     g_assert_cmphex(command.transfer_length, ==, 0x1c00);
 }
 
+static void test_negotiation_flags(void)
+{
+    const uint16_t controls[] = { 0x0260, 0x0460, 0x0c60 };
+    uint8_t entries[TEST_ENTRIES][ISP12160_IOCB_ENTRY_BYTES];
+    ISP12160IOCBCommand command;
+    ISP12160IOCBSegment segment;
+    Error *err = NULL;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(controls); i++) {
+        build_no_data(entries);
+        entries[0][0] = ISP12160_IOCB_COMMAND_TYPE;
+        entries[0][20] = 0x12;
+        entries[0][24] = 128;
+        stw_le_p(entries[0] + 12, controls[i]);
+        stw_le_p(entries[0] + 18, 1);
+        set_segment_32(entries[0], 32, 0x12340000, 128);
+        g_assert_true(isp12160_iocb_parse_32(
+            entries[0], 1, &command, &segment, 1, &err));
+        g_assert_null(err);
+        g_assert_cmphex(command.control_flags, ==, controls[i]);
+        g_assert_cmpuint(command.direction, ==,
+                         ISP12160_IOCB_DIRECTION_UNKNOWN);
+        g_assert_cmpuint(command.cdb[0], ==, 0x12);
+        g_assert_cmpuint(command.transfer_length, ==, 128);
+        g_assert_cmphex(segment.address, ==, 0x12340000);
+        g_assert_cmpuint(segment.length, ==, 128);
+    }
+}
+
 static void test_continuation(void)
 {
     uint8_t entries[TEST_ENTRIES][ISP12160_IOCB_ENTRY_BYTES];
@@ -413,6 +443,7 @@ int main(int argc, char **argv)
 
     g_test_add_func("/isp12160-iocb/no-data", test_no_data);
     g_test_add_func("/isp12160-iocb/data-unknown", test_data_unknown);
+    g_test_add_func("/isp12160-iocb/negotiation-flags", test_negotiation_flags);
     g_test_add_func("/isp12160-iocb/continuation", test_continuation);
     g_test_add_func("/isp12160-iocb/32bit-continuation",
                     test_32bit_continuation);

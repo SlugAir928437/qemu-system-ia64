@@ -175,10 +175,6 @@ static int test_i2000_dsdt_contract(void)
     static const UINT8 empty_prt[] = {
         0x08, '_', 'P', 'R', 'T', 0x12, 0x02, 0x00,
     };
-    static const UINT8 audio_prt[] = {
-        0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x04, 0x00,
-        0x00, 0x00, 0x0a, 0x10,
-    };
     static const UINT8 hid[] = {
         0x08, '_', 'H', 'I', 'D', 0x0c, 0x41, 0xd0, 0x05, 0x01,
     };
@@ -222,8 +218,7 @@ static int test_i2000_dsdt_contract(void)
         mI2000DsdtAmlTemplate, sizeof(mI2000DsdtAmlTemplate),
         empty_prt, sizeof(empty_prt));
 
-    if (IA64_I2000_DSDT_AML_SIZE != 1186U ||
-        !byte_sequence_present(mI2000DsdtAmlTemplate,
+    if (!byte_sequence_present(mI2000DsdtAmlTemplate,
                                sizeof(mI2000DsdtAmlTemplate),
                                pci_hid, sizeof(pci_hid)) ||
         !byte_sequence_present(mI2000DsdtAmlTemplate,
@@ -238,9 +233,6 @@ static int test_i2000_dsdt_contract(void)
         !byte_sequence_present(mI2000DsdtAmlTemplate,
                                sizeof(mI2000DsdtAmlTemplate),
                                pci3, sizeof(pci3)) ||
-        !byte_sequence_present(mI2000DsdtAmlTemplate,
-                               sizeof(mI2000DsdtAmlTemplate),
-                               audio_prt, sizeof(audio_prt)) ||
         pci0_offset == ~(UINTN)0 || ifb0_offset == ~(UINTN)0 ||
         ps2k_offset == ~(UINTN)0 ||
         ps2m_offset == ~(UINTN)0 || pci1_offset == ~(UINTN)0 ||

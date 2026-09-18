@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/usb/usb.h"
 #include "qapi/error.h"
@@ -322,6 +323,9 @@ static void usb_fill_port(USBPort *port, void *opaque, int index,
     port->index = index;
     port->ops = ops;
     port->speedmask = speedmask;
+    if (current_machine->usb1) {
+        port->speedmask &= USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL;
+    }
     usb_port_location(port, NULL, index + 1);
 }
 

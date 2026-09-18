@@ -428,6 +428,20 @@ static void machine_set_usb(Object *obj, bool value, Error **errp)
     ms->usb_disabled = !value;
 }
 
+static bool machine_get_usb1(Object *obj, Error **errp)
+{
+    return MACHINE(obj)->usb1;
+}
+
+static void machine_set_usb1(Object *obj, bool value, Error **errp)
+{
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        error_setg(errp, "usb1 must be set before machine initialization");
+        return;
+    }
+    MACHINE(obj)->usb1 = value;
+}
+
 static bool machine_get_graphics(Object *obj, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
@@ -1152,6 +1166,11 @@ static void machine_class_init(ObjectClass *oc, const void *data)
         machine_get_usb, machine_set_usb);
     object_class_property_set_description(oc, "usb",
         "Set on/off to enable/disable usb");
+
+    object_class_property_add_bool(oc, "usb1",
+        machine_get_usb1, machine_set_usb1);
+    object_class_property_set_description(oc, "usb1",
+        "Limit all USB ports to USB 1.1 speeds (1.5/12 Mb/s)");
 
     object_class_property_add_bool(oc, "graphics",
         machine_get_graphics, machine_set_graphics);

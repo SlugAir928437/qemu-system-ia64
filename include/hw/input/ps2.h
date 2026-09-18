@@ -73,6 +73,8 @@ struct PS2KbdState {
     int ledstate;
     bool need_high_bit;
     unsigned int modifiers; /* bitmask of MOD_* constants above */
+    uint8_t key_type[256];
+    bool key_down[256];
 };
 
 #define TYPE_PS2_KBD_DEVICE "ps2-kbd"

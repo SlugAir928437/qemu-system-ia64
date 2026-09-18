@@ -97,6 +97,51 @@ static BOOLEAN time_valid(const EFI_TIME *Time)
            Time->Second <= 59U && Time->Nanosecond < 1000000000U;
 }
 
+static BOOLEAN boot_variables_valid(EFI_RUNTIME_SERVICES *Runtime)
+{
+    static UINT8 global_guid[16] = {
+        0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
+        0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c
+    };
+    static CHAR16 order_name[] = {
+        'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0
+    };
+    static const CHAR16 hex[] = u"0123456789ABCDEF";
+    CHAR16 option_name[] = { 'B', 'o', 'o', 't', 0, 0, 0, 0, 0 };
+    UINT16 order[32];
+    UINT8 option[1024];
+    UINT32 attributes = 0;
+    UINTN size = sizeof(order);
+    UINTN offset;
+    UINTN path_size;
+    UINTN i;
+
+    if (Runtime->GetVariable(order_name, global_guid, &attributes,
+                              &size, order) != EFI_SUCCESS ||
+        attributes != 7U || size == 0 || (size & 1U) != 0) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        option_name[4 + i] = hex[(order[0] >> (12 - 4 * i)) & 15];
+    }
+    size = sizeof(option);
+    if (Runtime->GetVariable(option_name, global_guid, &attributes,
+                              &size, option) != EFI_SUCCESS ||
+        attributes != 7U || size < 10U || (get_u32(option) & 1U) == 0) {
+        return 0;
+    }
+    path_size = option[4] | ((UINTN)option[5] << 8);
+    for (offset = 6; offset + 2 <= size; offset += 2) {
+        if (option[offset] == 0 && option[offset + 1] == 0) {
+            offset += 2;
+            return path_size >= 4U && offset + path_size == size &&
+                option[size - 4] == 0x7f && option[size - 3] == 0xff &&
+                option[size - 2] == 4 && option[size - 1] == 0;
+        }
+    }
+    return 0;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     IA64_TEST_CONTEXT context = {
@@ -113,6 +158,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     EFI_STATUS status;
 
     (void)ImageHandle;
+    ia64_test_check(&context, "boot-variables",
+                    boot_variables_valid(runtime), EFI_DEVICE_ERROR,
+                    "initial-boot-order-and-option");
     status = runtime->GetTime(&before, &capabilities);
     ia64_test_check(&context, "get-time",
                     status == EFI_SUCCESS && time_valid(&before) &&

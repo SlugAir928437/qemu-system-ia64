@@ -181,12 +181,12 @@ static void register_block_write(void *opaque, uint16_t offset,
         }
     } else if (block->decoded_role == INTEL_460GX_DECODED_XXB &&
                ranges_overlap(offset, size,
-                              INTEL_460GX_XXB_BUSNO_OFFSET, 2)) {
+                              INTEL_460GX_SAC_BUSNO_OFFSET, 2)) {
         update.route_mask = BIT(block->decoded_port);
         update.routes[block->decoded_port].first_bus =
-            block->config[INTEL_460GX_XXB_BUSNO_OFFSET];
+            block->config[INTEL_460GX_SAC_BUSNO_OFFSET];
         update.routes[block->decoded_port].last_bus =
-            block->config[INTEL_460GX_XXB_SUBNO_OFFSET];
+            block->config[INTEL_460GX_SAC_SUBNO_OFFSET];
         decoded = true;
     }
 
@@ -308,6 +308,7 @@ static void intel_460gx_chipset_init_registers(
         intel_460gx_chipset_device_mask());
     s->sac[0][0].reset[INTEL_460GX_SAC_CBN_OFFSET] =
         intel_460gx_host_get_cbn(s->host);
+    s->sac[0][0].reset[INTEL_460GX_SAC_CBUSES_OFFSET] = 1;
     register_block_set_long(
         s->sac[0][0].reset, INTEL_460GX_SAC_DEVNPRES_OFFSET,
         ~intel_460gx_chipset_present_mask(s->expander_mask) &
@@ -374,6 +375,11 @@ static void intel_460gx_chipset_init_registers(
                             INTEL_460GX_SAC_REVISION);
         s->downstream_sac[i].reset[PCI_HEADER_TYPE] =
             PCI_HEADER_TYPE_MULTI_FUNCTION;
+        s->downstream_sac[i].chipset = s;
+        s->downstream_sac[i].decoded_role = INTEL_460GX_DECODED_XXB;
+        s->downstream_sac[i].decoded_port = i;
+        s->downstream_sac[i].wmask[INTEL_460GX_SAC_BUSNO_OFFSET] = UINT8_MAX;
+        s->downstream_sac[i].wmask[INTEL_460GX_SAC_SUBNO_OFFSET] = UINT8_MAX;
 
         if (i == INTEL_460GX_WXB0_PORT || i == INTEL_460GX_WXB1_PORT) {
             device_id = INTEL_460GX_WXB_ID;
@@ -384,11 +390,6 @@ static void intel_460gx_chipset_init_registers(
         }
         register_block_init(block, device_id, PCI_CLASS_BRIDGE_HOST,
                             revision);
-        block->chipset = s;
-        block->decoded_role = INTEL_460GX_DECODED_XXB;
-        block->decoded_port = i;
-        block->wmask[INTEL_460GX_XXB_BUSNO_OFFSET] = UINT8_MAX;
-        block->wmask[INTEL_460GX_XXB_SUBNO_OFFSET] = UINT8_MAX;
         if (i == INTEL_460GX_WXB0_PORT ||
             i == INTEL_460GX_WXB1_PORT) {
             block->w1cmask[0x44] = 0xeb;
@@ -470,11 +471,11 @@ void intel_460gx_chipset_set_downstream_reset_range(
 
     g_return_if_fail(port < INTEL_460GX_DOWNSTREAM_PORTS);
     g_return_if_fail(first_bus <= last_bus);
-    block = &s->expander[port];
-    block->reset[INTEL_460GX_XXB_BUSNO_OFFSET] = first_bus;
-    block->reset[INTEL_460GX_XXB_SUBNO_OFFSET] = last_bus;
-    block->config[INTEL_460GX_XXB_BUSNO_OFFSET] = first_bus;
-    block->config[INTEL_460GX_XXB_SUBNO_OFFSET] = last_bus;
+    block = &s->downstream_sac[port];
+    block->reset[INTEL_460GX_SAC_BUSNO_OFFSET] = first_bus;
+    block->reset[INTEL_460GX_SAC_SUBNO_OFFSET] = last_bus;
+    block->config[INTEL_460GX_SAC_BUSNO_OFFSET] = first_bus;
+    block->config[INTEL_460GX_SAC_SUBNO_OFFSET] = last_bus;
 }
 
 static void intel_460gx_record_sac_error(Intel460GXChipsetState *s,
@@ -903,9 +904,7 @@ static bool intel_460gx_chipset_post_load(void *opaque, int version_id,
     Intel460GXDecodedStateUpdate update = { 0 };
     unsigned int port;
 
-    if (version_id < 4) {
-        return true;
-    }
+    (void)version_id;
     update.has_cbn = true;
     update.cbn = s->sac[0][0].config[INTEL_460GX_SAC_CBN_OFFSET];
     update.has_chipset_present = true;
@@ -916,16 +915,16 @@ static bool intel_460gx_chipset_post_load(void *opaque, int version_id,
     update.route_mask = s->expander_mask;
     for (port = 0; port < INTEL_460GX_DOWNSTREAM_PORTS; port++) {
         update.routes[port].first_bus =
-            s->expander[port].config[INTEL_460GX_XXB_BUSNO_OFFSET];
+            s->downstream_sac[port].config[INTEL_460GX_SAC_BUSNO_OFFSET];
         update.routes[port].last_bus =
-            s->expander[port].config[INTEL_460GX_XXB_SUBNO_OFFSET];
+            s->downstream_sac[port].config[INTEL_460GX_SAC_SUBNO_OFFSET];
     }
     return intel_460gx_host_apply_decoded_update(s->host, &update, errp);
 }
 
 static const VMStateDescription vmstate_intel_460gx_chipset = {
     .name = TYPE_INTEL_460GX_CHIPSET,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 2,
     .post_load_errp = intel_460gx_chipset_post_load,
     .fields = (const VMStateField[]) {
@@ -937,7 +936,7 @@ static const VMStateDescription vmstate_intel_460gx_chipset = {
                        vmstate_intel_460gx_register_block,
                        Intel460GXRegisterBlock),
         VMSTATE_STRUCT_2DARRAY(memory_card, Intel460GXChipsetState,
-                               2, 2, 3,
+                               2, 2, 0,
                                vmstate_intel_460gx_register_block,
                                Intel460GXRegisterBlock),
         VMSTATE_STRUCT_ARRAY(downstream_sac, Intel460GXChipsetState,

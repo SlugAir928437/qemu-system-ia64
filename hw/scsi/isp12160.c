@@ -35,7 +35,6 @@
      (ISP12160_SCSI_MAX_CHAIN_ENTRIES - 1U))
 #define ISP12160_SCSI_BH_BUDGET           64U
 #define ISP12160_SCSI_REQUEST_MAGIC        UINT32_C(0x49533252)
-#define ISP12160_SCSI_REQUEST_VERSION      2U
 
 #define ISP12160_HC_RESET_RELEASE_DISABLE \
     (ISP12160_HC_RESET_RISC | ISP12160_HC_RELEASE_RISC | \
@@ -636,6 +635,16 @@ static void isp12160_mailbox_bh(void *opaque)
     s->mailbox_pending = false;
     status = isp12160_run_mailbox(s, s->pending_mailbox);
 
+    /* Preserve queue indices for commands without mailbox 4/5 results. */
+    if (s->pending_mailbox[0] != ISP12160_MBC_MAILBOX_TEST) {
+        if (s->request_queue.valid) {
+            s->mailbox[4] = s->request_queue.consumer;
+        }
+        if (s->response_queue.valid) {
+            s->mailbox[5] = s->response_queue.producer;
+        }
+    }
+
     trace_isp12160_mailbox(s, s->pending_mailbox[0],
                            s->pending_mailbox[1],
                            s->pending_mailbox[2],
@@ -1162,9 +1171,15 @@ static void isp12160_scsi_submit(ISP12160State *s,
     device = scsi_device_find(&s->scsi_bus, command->channel,
                               command->target, command->lun);
     if (!device) {
-        isp12160_scsi_queue_simple_status(
-            s, command->handle, ISP12160_IOCB_CS_INCOMPLETE,
-            ISP12160_IOCB_SF_GOT_BUS, command->transfer_length);
+        ISP12160IOCBStatus status = {
+            .handle = command->handle,
+            .residual_length = command->transfer_length,
+            .completion_status = ISP12160_IOCB_CS_INCOMPLETE,
+            .state_flags = ISP12160_IOCB_SF_GOT_BUS,
+            .status_flags = ISP12160_IOCB_STF_TIMEOUT,
+        };
+
+        isp12160_scsi_queue_status(s, &status);
         g_free(segments);
         return;
     }
@@ -1498,7 +1513,6 @@ static void isp12160_scsi_save_request(QEMUFile *f, SCSIRequest *sreq)
     }
 
     qemu_put_be32(f, ISP12160_SCSI_REQUEST_MAGIC);
-    qemu_put_be16(f, ISP12160_SCSI_REQUEST_VERSION);
     qemu_put_be32(f, request->command.handle);
     qemu_put_be16(f, request->command.timeout);
     qemu_put_be16(f, request->command.control_flags);
@@ -1613,14 +1627,9 @@ static void *isp12160_scsi_load_request(QEMUFile *f, SCSIRequest *sreq)
     ISP12160State *s = container_of(bus, ISP12160State, scsi_bus);
     ISP12160SCSIRequest *request = g_new0(ISP12160SCSIRequest, 1);
     unsigned int i;
-    uint16_t version;
 
     request->controller = s;
     if (qemu_get_be32(f) != ISP12160_SCSI_REQUEST_MAGIC) {
-        goto invalid;
-    }
-    version = qemu_get_be16(f);
-    if (version < 1 || version > ISP12160_SCSI_REQUEST_VERSION) {
         goto invalid;
     }
     request->command.handle = qemu_get_be32(f);
@@ -1640,11 +1649,9 @@ static void *isp12160_scsi_load_request(QEMUFile *f, SCSIRequest *sreq)
     request->segment_index = qemu_get_be16(f);
     request->segment_offset = qemu_get_be32(f);
     request->dma_failed = qemu_get_ubyte(f);
-    if (version >= 2) {
-        request->deadline = qemu_get_be64(f);
-        if (request->deadline < 0) {
-            goto invalid;
-        }
+    request->deadline = qemu_get_be64(f);
+    if (request->deadline < 0) {
+        goto invalid;
     }
     if (request->command.segment_count > ISP12160_SCSI_MAX_SEGMENTS) {
         goto invalid;
@@ -1706,21 +1713,23 @@ static const SCSIBusInfo isp12160_scsi_bus_info = {
 
 static void isp12160_host_command_write(ISP12160State *s, uint16_t value)
 {
-    s->host_command = value;
-
     switch (value) {
     case ISP12160_HC_RESET_RISC:
+        isp12160_reset_risc(s);
+        s->host_command = ISP12160_HCCR_RESET;
+        break;
+
     case ISP12160_HC_RESET_RELEASE_DISABLE:
         isp12160_reset_risc(s);
+        s->host_command = 0;
         break;
 
     case ISP12160_HC_PAUSE_RISC:
-        if (s->risc_running) {
-            s->risc_paused = true;
-        }
+        s->risc_paused = true;
         break;
 
     case ISP12160_HC_RELEASE_RISC:
+        s->host_command = 0;
         s->risc_paused = false;
         isp12160_scsi_schedule_queue(s);
         break;
@@ -1763,7 +1772,7 @@ static void isp12160_host_command_write(ISP12160State *s, uint16_t value)
         break;
 
     case ISP12160_HC_DISABLE_BIOS:
-        /* There is no option ROM in mailbox; retain only the command latch. */
+        /* No option ROM is exposed. */
         break;
 
     default:
@@ -1810,7 +1819,10 @@ static uint64_t isp12160_register_read(void *opaque, hwaddr address,
     case ISP12160_REG_SEMAPHORE:
         return s->semaphore;
     case ISP12160_REG_HOST_COMMAND:
-        return s->host_command;
+        return s->host_command |
+               (s->risc_paused ? ISP12160_HCCR_PAUSE : 0) |
+               ((s->istatus & ISP12160_ISTATUS_PCI_INT) ?
+                ISP12160_HCCR_HOST_INT : 0);
 
     case ISP12160_REG_ID_LOW:
     case ISP12160_REG_ID_HIGH:
@@ -2002,6 +2014,7 @@ static bool isp12160_scsi_bytes_zero(const uint8_t *bytes, size_t length)
 static bool isp12160_scsi_status_entry_valid(const uint8_t *entry)
 {
     uint16_t state_flags = lduw_le_p(entry + 12);
+    uint16_t status_flags = lduw_le_p(entry + 14);
     uint16_t sense_length = lduw_le_p(entry + 18);
     uint16_t completion = lduw_le_p(entry + 10);
     uint32_t residual = ldl_le_p(entry + 20);
@@ -2010,7 +2023,8 @@ static bool isp12160_scsi_status_entry_valid(const uint8_t *entry)
            !entry[2] && !entry[3] && lduw_le_p(entry + 8) <= UINT8_MAX &&
            isp12160_scsi_completion_valid(completion) &&
            !(state_flags & ~ISP12160_IOCB_STATE_FLAGS_MASK) &&
-           !lduw_le_p(entry + 14) && !lduw_le_p(entry + 16) &&
+           !(status_flags & ~ISP12160_IOCB_STF_TIMEOUT) &&
+           !lduw_le_p(entry + 16) &&
            sense_length <= ISP12160_IOCB_SENSE_BYTES &&
            isp12160_scsi_bytes_zero(entry + 24, 8) &&
            isp12160_scsi_bytes_zero(
@@ -2089,6 +2103,7 @@ static int isp12160_post_load(void *opaque, int version_id)
     bool firmware_loaded;
     unsigned int i;
 
+    (void)version_id;
     for (i = 0; i < ARRAY_SIZE(s->initiator_id); i++) {
         if (s->initiator_id[i] > 15) {
             return -EINVAL;
@@ -2108,6 +2123,7 @@ static int isp12160_post_load(void *opaque, int version_id)
         s->istatus & ~(ISP12160_ISTATUS_PCI_INT |
                        ISP12160_ISTATUS_RISC_INT) ||
         s->semaphore & ~ISP12160_SEMAPHORE_LOCK ||
+        s->host_command & ~ISP12160_HCCR_RESET ||
         (s->mailbox_pending && s->mailbox_staging) ||
         ((s->istatus & ISP12160_ISTATUS_PCI_INT) &&
          !s->mailbox_pending) ||
@@ -2144,7 +2160,7 @@ static int isp12160_post_load(void *opaque, int version_id)
     } else {
         if (s->token_address || s->native_firmware_start ||
             s->native_firmware_checksum || s->native_firmware_words ||
-            s->token_verified || s->risc_running || s->risc_paused) {
+            s->token_verified || s->risc_running) {
             return -EINVAL;
         }
         for (i = 0; i < ARRAY_SIZE(s->token_ram); i++) {
@@ -2159,8 +2175,7 @@ static int isp12160_post_load(void *opaque, int version_id)
     }
 
     if ((s->token_verified && !firmware_loaded) ||
-        (s->risc_running && !s->token_verified) ||
-        (s->risc_paused && !s->risc_running)) {
+        (s->risc_running && !s->token_verified)) {
         return -EINVAL;
     }
 
@@ -2198,7 +2213,7 @@ static int isp12160_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_isp12160_mailbox = {
     .name = TYPE_ISP12160_MAILBOX,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 4,
     .post_load = isp12160_post_load,
     .fields = (const VMStateField[]) {
@@ -2240,7 +2255,7 @@ static const VMStateDescription vmstate_isp12160_mailbox = {
 
 static const VMStateDescription vmstate_isp12160_queue = {
     .name = TYPE_ISP12160_QUEUE,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 4,
     .post_load = isp12160_post_load,
     .fields = (const VMStateField[]) {
@@ -2295,7 +2310,7 @@ static const VMStateDescription vmstate_isp12160_queue = {
 
 static const VMStateDescription vmstate_isp12160_scsi = {
     .name = TYPE_ISP12160_SCSI,
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 5,
     .pre_save = isp12160_scsi_pre_save,
     .post_load = isp12160_post_load,

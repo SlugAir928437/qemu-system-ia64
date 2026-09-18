@@ -1262,11 +1262,13 @@ static int mptsas_write_config_page(MPTSASState *s, int type, int number,
         uint32_t flags = ldl_le_p(page + 4);
         uint32_t fixed = mptsas_is_spi(s) ? MPI_IOUNITPAGE1_MULTI_FUNCTION :
                                            MPI_IOUNITPAGE1_SINGLE_FUNCTION;
-        uint32_t writable = MPI_IOUNITPAGE1_DISABLE_IR |
+        uint32_t writable = MPI_IOUNITPAGE1_IR_USE_STATIC_VOLUME_ID |
+                            MPI_IOUNITPAGE1_DISABLE_IR |
                             MPI_IOUNITPAGE1_SATA_WRITE_CACHE_DISABLE;
 
         /*
          * Function layout is fixed; RAID availability comes from IOC Page 2.
+         * The static RAID volume ID policy has no effect without RAID volumes.
          * The SATA cache policy has no effect on SSP or parallel targets.
          */
         if ((flags & ~writable) != fixed) {

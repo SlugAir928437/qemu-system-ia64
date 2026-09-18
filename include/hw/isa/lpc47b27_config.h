@@ -19,6 +19,7 @@
 #define LPC47B27_CONFIG_CR_DEVICE_ID             0x20U
 #define LPC47B27_CONFIG_DEVICE_ID                0x51U
 
+#define LPC47B27_CONFIG_LDN_PARALLEL             0x03U
 #define LPC47B27_CONFIG_LDN_SERIAL1              0x04U
 #define LPC47B27_CONFIG_LDN_KEYBOARD             0x07U
 
@@ -27,14 +28,16 @@
 #define LPC47B27_CONFIG_CR_BASE_LSB              0x61U
 #define LPC47B27_CONFIG_CR_PRIMARY_IRQ           0x70U
 #define LPC47B27_CONFIG_CR_SECONDARY_IRQ         0x72U
+#define LPC47B27_CONFIG_CR_DMA                   0x74U
 #define LPC47B27_CONFIG_CR_MODE                  0xf0U
+#define LPC47B27_CONFIG_CR_MODE2                 0xf1U
 
 #define LPC47B27_CONFIG_UART_BASE_MIN            UINT16_C(0x0100)
 #define LPC47B27_CONFIG_UART_BASE_MAX            UINT16_C(0x0ff8)
 #define LPC47B27_CONFIG_UART_BASE_ALIGN          UINT16_C(8)
 
-/* UART, i8042 keyboard, and i8042 mouse outputs in the ISA wrapper. */
-#define LPC47B27_IRQ_ROUTER_SOURCE_COUNT          3U
+/* UART, keyboard, mouse, and parallel outputs in the ISA wrapper. */
+#define LPC47B27_IRQ_ROUTER_SOURCE_COUNT          4U
 
 typedef uint32_t LPC47B27ConfigChange;
 
@@ -50,6 +53,7 @@ typedef uint32_t LPC47B27ConfigChange;
 #define LPC47B27_CONFIG_CHANGE_I8042_KBD_IRQ     (UINT32_C(1) << 8)
 #define LPC47B27_CONFIG_CHANGE_I8042_MOUSE_IRQ   (UINT32_C(1) << 9)
 #define LPC47B27_CONFIG_CHANGE_I8042_MODE        (UINT32_C(1) << 10)
+#define LPC47B27_CONFIG_CHANGE_PARALLEL          (UINT32_C(1) << 11)
 
 #define LPC47B27_CONFIG_CHANGE_UART_RESOURCES    \
     (LPC47B27_CONFIG_CHANGE_UART_ACTIVATE |      \
@@ -78,6 +82,14 @@ typedef struct LPC47B27ConfigState {
     uint8_t keyboard_irq;
     uint8_t mouse_irq;
     uint8_t keyboard_mode;
+
+    uint8_t parallel_activate;
+    uint8_t parallel_base_msb;
+    uint8_t parallel_base_lsb;
+    uint8_t parallel_irq;
+    uint8_t parallel_dma;
+    uint8_t parallel_mode;
+    uint8_t parallel_mode2;
 } LPC47B27ConfigState;
 
 typedef struct LPC47B27UartConfig {

@@ -49,6 +49,10 @@ struct OHCIState {
     int64_t sof_time;
     int64_t resume_deadline[OHCI_MAX_PORTS];
     int64_t resume_remaining[OHCI_MAX_PORTS];
+    uint16_t resume_pending;
+    int64_t suspend_deadline;
+    int64_t suspend_remaining;
+    bool wakeup_pending;
 
     /* OHCI state */
     /* Control partition */

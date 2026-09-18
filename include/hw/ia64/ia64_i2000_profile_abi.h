@@ -66,6 +66,12 @@
 #define IA64_I2000_PROFILE_UART_IRQ                          4U
 #define IA64_I2000_PROFILE_UART_INPUT_CLOCK_HZ               1843200U
 
+#define IA64_I2000_PROFILE_PARALLEL_LDN                      3U
+#define IA64_I2000_PROFILE_PARALLEL_PORT                     0x0378U
+#define IA64_I2000_PROFILE_PARALLEL_IRQ                      7U
+#define IA64_I2000_PROFILE_PARALLEL_MODE                     0x3aU
+#define IA64_I2000_PROFILE_PARALLEL_DMA_DISABLED             4U
+
 #define IA64_I2000_PROFILE_I8042_LDN                         7U
 #define IA64_I2000_PROFILE_I8042_KBD_IRQ_REGISTER            0x70U
 #define IA64_I2000_PROFILE_I8042_MOUSE_IRQ_REGISTER          0x72U

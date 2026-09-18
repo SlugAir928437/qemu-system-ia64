@@ -1048,7 +1048,7 @@ static void ehci_port_write(void *ptr, hwaddr addr,
          *  Table 2.16 Set the enable bit(and enable bit change) to indicate
          *  to SW that this port has a high speed device attached
          */
-        if (dev && dev->attached && (dev->speedmask & USB_SPEED_MASK_HIGH)) {
+        if (dev && dev->attached && dev->speed == USB_SPEED_HIGH) {
             val |= PORTSC_PED;
         }
     }

@@ -6,6 +6,19 @@ Device emulation source notice
 The following public sources are technical references for
 the device models that link to this notice:
 
+* Intel's `EFI Specification 1.10
+  <https://www.intel.com/content/dam/doc/product-specification/efi-v1-10-specification.pdf>`__,
+  section 5.2 (``AllocatePool()``), for eight-byte pool alignment.
+* Microchip's `LPC47B27x Data Sheet, DS00002492A
+  <https://ww1.microchip.com/downloads/en/DeviceDoc/00002492A.pdf>`__,
+  sections 10.5–10.7 and tables 20-1, 20-4–20-8, for the parallel port's
+  configuration, 16-byte FIFO, test mode and service interrupt thresholds.
+  The port has no attached peripheral; DMA and EPP transfers are not
+  implemented.
+* IBM's `PC/XT 286 Technical Reference, August 1986
+  <https://bitsavers.trailing-edge.com/pdf/ibm/pc/xt/68X2537_XT286_Technical_Reference_Aug86.pdf>`__,
+  pages 4-9–4-10, 4-14 and 4-24–4-26, for PS/2 scan code set 3 key-type
+  commands, input validation and default key types.
 * Linux
   `sound/pci/cs4281.c <https://github.com/torvalds/linux/blob/master/sound/pci/cs4281.c>`__
   for CS4281 BA0 registers, the four DMA and FIFO channels, serial-slot
@@ -18,9 +31,11 @@ the device models that link to this notice:
   descriptors, packet offloads, status blocks, and interrupts.
 * Broadcom's `BCM57XX Programmer's Guide, 57XX-PG105-R
   <https://datasheet.datasheetarchive.com/originals/library/Datasheets-ZSAA1/DSAZSAA00017932.pdf>`__,
-  pages 232-234 and 325-326, for the MISC_HOST_CTRL byte-swap bit and target
-  byte ordering, and pages 379-380 and 550 for MAC status and NVM command
-  write-one-to-clear fields and link-change acknowledgement.  The illumos
+  pages 232-240 and 325-326, for the MISC_HOST_CTRL byte-swap bit, target
+  byte ordering and non-frame DMA word ordering, pages 103-106 for status
+  block layout and tagged interrupt acknowledgement, and pages 379-380 and
+  550 for MAC status and NVM command write-one-to-clear fields and link-change
+  acknowledgement.  The illumos
   `bge_chip2.c
   <https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/io/bge/bge_chip2.c>`__
   also documents and programs the byte order for native big-endian MMIO.
@@ -35,20 +50,43 @@ the device models that link to this notice:
   `drivers/scsi/qla1280.h <https://github.com/torvalds/linux/blob/master/drivers/scsi/qla1280.h>`__
   and
   `qla1280.c <https://github.com/torvalds/linux/blob/master/drivers/scsi/qla1280.c>`__
-  for ISP12160 mailbox, target, queue and autosense controls;
+  for ISP12160 mailbox, target, queue and autosense controls, and the
+  combined RISC reset/release command and queue-index reads during mailbox
+  completion;
   `drivers/net/ethernet/intel/e100.c <https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/intel/e100.c>`__
   for 82550/82559 configuration byte 18 receive CRC and stripping controls.
 * Intel's `8255x 10/100 Mbps Ethernet Controller Family Open Source Software
   Developer Manual <https://www.intel.com/content/dam/doc/manual/8255x-10-100-mbps-ethernet-controller-software-dev-manual.pdf>`__,
-  section 7.3.11, for the PHY equalizer register's NOP command.  Other
-  equalizer commands are not implemented.
+  section 6.4.3, for receive completion flags, type/length classification,
+  and DMA write ordering, section 6.4.2.3 (configuration byte 18), for
+  receive CRC transfer and padding stripping, and section 7.3.11, for the
+  PHY equalizer register's NOP command.  Other equalizer commands are not
+  implemented.
+* Intel's `82557: A Guide to 82596 Compatibility, AP-368
+  <https://manualzilla.com/doc/5929355/intel-82557-to-82596-compatibility-guide>`__,
+  section 5.1, for receive memory structure compatibility with the 82596.
+  Intel's `82596DX/SX datasheet
+  <https://bitsavers.trailing-edge.com/components/intel/ethernet/i82596.pdf>`__,
+  pages 54–59, describes flexible receive buffer descriptors.  The
+  `MIT 6.828 network driver lab addendum
+  <https://pdos.csail.mit.edu/6.828/2008/labs/lab6/lab6.html>`__
+  documents the 8255x RBD layout and the total packet count in the RFD.
 * NetBSD's `sys/dev/ic/isp.c
   <https://github.com/NetBSD/src/blob/trunk/sys/dev/ic/isp.c>`__
   (BSD-2-Clause) for the 32-LUN limit and per-LUN queue parameters of
-  Ultra2/Ultra3 SCSI adapters.
+  Ultra2/Ultra3 SCSI adapters, and `sys/dev/ic/ispreg.h
+  <https://github.com/NetBSD/src/blob/trunk/sys/dev/ic/ispreg.h>`__
+  for the HCCR command and status bits.  `sys/dev/ic/ispmbox.h
+  <https://github.com/NetBSD/src/blob/trunk/sys/dev/ic/ispmbox.h>`__
+  defines the IOCB transfer negotiation and timeout flags.
 * Intel's `8254x Family of Gigabit Ethernet Controllers Software Developer's
   Manual <https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf>`__,
   sections 3.2.7 and 3.4.3, for receive and transmit interrupt timers.
+* XFree86's
+  `460gxPCI.c <https://github.com/NetBSD/xsrc/blob/netbsd-5/xfree/xc/programs/Xserver/hw/xfree86/os-support/bus/460gxPCI.c>`__
+  and
+  `scanpci.c <https://github.com/NetBSD/xsrc/blob/netbsd-5/xfree/xc/programs/Xserver/hw/xfree86/etc/scanpci.c>`__
+  for the Intel 460GX CBN, CBUSES, DEVNPRES, BUSNO and SUBNO registers.
 * The public PCI ID Repository
   `pci.ids <https://github.com/pciutils/pciids/blob/master/pci.ids>`__
   for the HP RMP-3 management-function identities.  Linux
@@ -61,6 +99,10 @@ the device models that link to this notice:
   for the LSI Fusion-MPT interface definitions, and Linux
   `drivers/message/fusion/mptbase.c <https://github.com/torvalds/linux/blob/master/drivers/message/fusion/mptbase.c>`__
   for the IOC reset doorbell functions and transition to the READY state.
+  LSI's `mpi_cnfg.h
+  <https://github.com/torvalds/linux/blob/master/drivers/message/fusion/lsi/mpi_cnfg.h>`__,
+  distributed with Linux,
+  defines IO Unit Page 1's static RAID volume ID policy.
 
 The IA-64 firmware's PCI controller handles and device paths follow the
 `UEFI 2.11 Device Path Protocol
@@ -73,3 +115,14 @@ The public EDK II
 <https://github.com/tianocore/edk2/blob/master/MdeModulePkg/Bus/Pci/PciBusDxe/PciDeviceSupport.c>`__
 is an implementation reference for publishing a PCI controller handle with
 both protocols.
+
+The IA-64 firmware describes the emulated HP machines' console UART using
+the revision 1 layout of Microsoft's `Serial Port Console Redirection Table
+<https://learn.microsoft.com/en-us/windows-hardware/drivers/bringup/serial-port-console-redirection-table>`__
+(January 2002).
+
+On HP profiles, VGA-primary configurations include the UART as a secondary
+console in ``ConOut``, ``ErrOut`` and HCDP, following the
+`VSI OpenVMS Version 8.4-1H1 Installation and Upgrade Manual
+<https://docs.vmssoftware.com/docs/VSI_OpenVMS_Installation_Manual.pdf>`__
+(Chapter 2, "Selecting a Primary and Secondary Console", page 12).

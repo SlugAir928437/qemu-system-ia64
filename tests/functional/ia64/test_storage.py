@@ -5,6 +5,7 @@
 
 from pathlib import Path
 import struct
+from subprocess import run
 
 from qemu_test import QemuSystemTest
 
@@ -30,7 +31,17 @@ class Ia64Storage(Ia64FirmwareTest):
         before = file_sha256(media)
         extra_args = ()
         if ide_mode is not None:
-            extra_args = ("-trace", "enable=bmdma_cmd_writeb")
+            trace_help = run([self.qemu_bin, "-d", "trace:help"],
+                             capture_output=True, encoding="utf8")
+            if (trace_help.returncode == 1 and
+                    trace_help.stdout.startswith(
+                        "Log items (comma separated):")):
+                self.skipTest("requires the log tracing backend")
+            trace_help.check_returncode()
+            if "bmdma_cmd_writeb" not in trace_help.stdout.splitlines():
+                self.skipTest("requires the bmdma_cmd_writeb trace event")
+            trace_file = Path(self.scratch_file(f"{name}.trace"))
+            extra_args = ("-d", "trace:bmdma_cmd_writeb", "-D", str(trace_file))
         vm = self.launch_ia64(
             name=name, media=media, optical=optical,
             machine_options=(
@@ -55,7 +66,7 @@ class Ia64Storage(Ia64FirmwareTest):
                     before, after,
                     f"{name}: media was not restored exactly")
         if ide_mode is not None:
-            trace = vm.get_log() or ""
+            trace = trace_file.read_text()
             if ide_mode == "dma":
                 self.assertIn("bmdma_cmd_writeb val: 0x00000009", trace)
                 self.assertIn("bmdma_cmd_writeb val: 0x00000001", trace)

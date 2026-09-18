@@ -1198,7 +1198,9 @@ static FloatRelation ia64_fp_register_compare(CPUIA64State *env,
     }
 
     magnitude = ia64_fp_register_magnitude_compare(&left, &right);
-    if (magnitude == 0 || is_abs) {
+    if (is_abs ||
+        (ia64_fp_register_format_is_zero(&left) &&
+         ia64_fp_register_format_is_zero(&right))) {
         return magnitude < 0 ? float_relation_less :
                magnitude > 0 ? float_relation_greater :
                                float_relation_equal;

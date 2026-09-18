@@ -24,6 +24,7 @@ PCI0_PATH = b"\x5c\x2e_SB_PCI0"
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
     "root-device-path", "controller-device-path", "console-output",
+    "console-variables",
 }
 
 
@@ -95,47 +96,77 @@ class HPRx2660Boot(QemuSystemTest):
             tables[table[:4]] = table
         return tables
 
-    def assert_rx2660_acpi(self, vm):
+    def assert_rx2660_acpi(self, vm, *, graphics=True):
         tables = self.acpi_tables(vm)
 
         self.assertTrue({b"FACP", b"APIC", b"SRAT", b"SLIT", b"HCDP",
-                         b"SSDT"} <= tables.keys())
+                         b"SSDT", b"SPCR"} <= tables.keys())
         self.assertNotIn(b"MCFG", tables)
+
+        # SPCR revision 1 field offsets.
+        spcr = tables[b"SPCR"]
+        self.assertEqual(len(spcr), 80)
+        self.assertEqual(spcr[8], 1)
+        self.assertEqual(sum(spcr) & 0xff, 0)
+        self.assertEqual(spcr[36:44], bytes((0, 0, 0, 0, 0, 8, 0, 0)))
+        self.assertEqual(struct.unpack_from("<Q", spcr, 44)[0], 0x88033000)
+        self.assertEqual(spcr[52:54], bytes((4, 0)))  # I/O SAPIC
+        self.assertEqual(struct.unpack_from("<I", spcr, 54)[0], 16)
+        self.assertEqual(spcr[58:64], bytes((7, 0, 1, 0, 0, 0)))
+        self.assertEqual(struct.unpack_from("<HH", spcr, 64),
+                         (0x1048, 0x103c))
+        self.assertEqual(spcr[68:71], bytes((0, 1, 2)))
+        self.assertEqual(struct.unpack_from("<I", spcr, 71)[0], 1)
+        self.assertEqual(spcr[75:80], bytes(5))
+
+        rsdp = self.read_physical(vm, ACPI_RECLAIM_TABLE_BASE, 36)
+        rsdt = self.read_sdt(vm, struct.unpack_from("<I", rsdp, 16)[0])
+        self.assertEqual(sum(rsdt) & 0xff, 0)
+        rsdt_tables = {
+            self.read_sdt(vm, struct.unpack_from("<I", rsdt, offset)[0])[:4]
+            for offset in range(ACPI_HEADER_SIZE, len(rsdt), 4)
+        }
+        self.assertEqual(rsdt_tables, tables.keys())
 
         hcdp = tables[b"HCDP"]
         self.assertEqual(hcdp[44:48], bytes((0, 0, 1, 2)))
         self.assertEqual(struct.unpack_from("<Q", hcdp, 60)[0], 0x88033000)
         self.assertEqual(struct.unpack_from("<HHII", hcdp, 68),
                          (0x1048, 0x103c, 16, 1843200))
-        self.assertEqual(hcdp[81], 0xc2)
+        self.assertEqual(hcdp[81], 0xc2 if graphics else 0xc6)
+        self.assertEqual(struct.unpack_from("<H", hcdp, 82)[0],
+                         1 if graphics else 0)
 
         uart_count = struct.unpack_from("<I", hcdp, 36)[0]
         device_offset = ACPI_HEADER_SIZE + 4 + 48 * uart_count
-        device_type, flags, device_length, efi_index = struct.unpack_from(
-            "<BBHH", hcdp, device_offset)
-        self.assertEqual((device_type, flags, efi_index), (0x0a, 1, 0))
-        self.assertEqual(device_offset + device_length, len(hcdp))
-        interface_offset = device_offset + 6
-        interface_length = struct.unpack_from(
-            "<H", hcdp, interface_offset + 2)[0]
-        self.assertEqual(hcdp[interface_offset], 1)
-        self.assertEqual(interface_length, 34)
-        vga_offset = interface_offset + interface_length
-        self.assertEqual(hcdp[vga_offset], 2)
+        if graphics:
+            device_type, flags, device_length, efi_index = struct.unpack_from(
+                "<BBHH", hcdp, device_offset)
+            self.assertEqual((device_type, flags, efi_index), (0x0a, 1, 0))
+            self.assertEqual(device_offset + device_length, len(hcdp))
+            interface_offset = device_offset + 6
+            interface_length = struct.unpack_from(
+                "<H", hcdp, interface_offset + 2)[0]
+            self.assertEqual(hcdp[interface_offset], 1)
+            self.assertEqual(interface_length, 34)
+            vga_offset = interface_offset + interface_length
+            self.assertEqual(hcdp[vga_offset], 2)
 
-        resource = struct.Struct("<BH5B6Q")
-        resource_offset = vga_offset + 1
-        for kind, type_flags, minimum, maximum, attributes in (
-            (0, 1, 0xa0000, 0xbffff, 1),
-            (1, 3, 0x3b0, 0x3df, 0),
-        ):
-            self.assertEqual(
-                resource.unpack_from(hcdp, resource_offset),
-                (0x8b, 53, kind, 0x0d, type_flags, 1, 0,
-                 0, minimum, maximum, 0, maximum - minimum + 1, attributes),
-            )
-            resource_offset += resource.size
-        self.assertEqual(resource_offset, device_offset + device_length)
+            resource = struct.Struct("<BH5B6Q")
+            resource_offset = vga_offset + 1
+            for kind, type_flags, minimum, maximum, attributes in (
+                (0, 1, 0xa0000, 0xbffff, 1),
+                (1, 3, 0x3b0, 0x3df, 0),
+            ):
+                self.assertEqual(
+                    resource.unpack_from(hcdp, resource_offset),
+                    (0x8b, 53, kind, 0x0d, type_flags, 1, 0,
+                     0, minimum, maximum, 0, maximum - minimum + 1, attributes),
+                )
+                resource_offset += resource.size
+            self.assertEqual(resource_offset, device_offset + device_length)
+        else:
+            self.assertEqual(device_offset, len(hcdp))
 
         fadt = tables[b"FACP"]
         dsdt = self.read_sdt(vm, struct.unpack_from("<Q", fadt, 140)[0])
@@ -170,14 +201,15 @@ class HPRx2660Boot(QemuSystemTest):
         self.assertEqual(
             aml.count(dword_memory(0x000A0000, 0x000FFFFF,
                                    0, 0x00060000)),
-            1,
+            1 if graphics else 0,
         )
 
         ssdt_aml = tables[b"SSDT"][ACPI_HEADER_SIZE:]
         self.assertEqual(ssdt_aml.count(SBA0_PATH), 1)
         self.assertNotIn(PCI0_PATH, ssdt_aml)
 
-    def run_firmware(self, layout="whole", *, fat32=False):
+    def run_firmware(self, layout="whole", *, fat32=False, nvram=False,
+                     graphics=True):
         firmware = (build_root() / "roms" / "ia64-firmware" /
                     "ia64-firmware.bin")
         disk = Path(self.scratch_file("rx2660-sas.img"))
@@ -188,14 +220,18 @@ class HPRx2660Boot(QemuSystemTest):
 
         self.require_accelerator("tcg")
         vm = self.get_vm()
-        vm.set_machine("hp-rx2660,nvram=none")
+        nvram_path = "none"
+        if nvram:
+            nvram_path = self.scratch_file("rx2660.nvram")
+            Path(nvram_path).write_bytes(bytes(512 * 1024))
+        vm.set_machine(f"hp-rx2660,nvram={nvram_path}")
         vm.set_console()
         vm.add_args(
             "-accel", "tcg",
             "-m", "4G",
             "-smp", "1,sockets=1,cores=1,threads=1",
             "-display", "none",
-            "-vga", "ati",
+            "-vga", "ati" if graphics else "none",
             "-net", "none",
             "-bios", str(firmware),
             "-drive", f"file={disk},format=raw,if=scsi,index=0",
@@ -221,11 +257,14 @@ class HPRx2660Boot(QemuSystemTest):
         ):
             with self.subTest(output=expected.decode("ascii")):
                 self.assertIn(expected, output)
-        self.assert_rx2660_acpi(vm)
+        self.assert_rx2660_acpi(vm, graphics=graphics)
         self.assertEqual(
             struct.unpack("<QQ", self.read_physical(vm, 0xFED01300, 16)),
             (0x40000000, 0xFFFFFFFFC0000000),
         )
+        if nvram:
+            wait_for_console_pattern(
+                self, "Boot Manager:        trying Boot0000\r\n", vm=vm)
         result = wait_for_suite(
             vm.console_socket, "smoke", SMOKE_CASES, 30.0,
             process_alive=vm.is_running,
@@ -236,11 +275,17 @@ class HPRx2660Boot(QemuSystemTest):
     def test_firmware_ready(self):
         self.run_firmware()
 
+    def test_serial_console(self):
+        self.run_firmware(graphics=False)
+
     def test_gpt_disk_boot(self):
         self.run_firmware("gpt")
 
     def test_gpt_fat32_disk_boot(self):
         self.run_firmware("gpt", fat32=True)
+
+    def test_boot_order_disk_boot(self):
+        self.run_firmware("gpt", nvram=True)
 
 if __name__ == "__main__":
     QemuSystemTest.main()

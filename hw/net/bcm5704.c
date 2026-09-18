@@ -65,6 +65,8 @@
 #define MAC_RX_MODE             0x0468
 #define HOSTCC_MODE             0x3c00
 #define GRC_MODE                0x6800
+#define GRC_MODE_BYTE_SWAP_NONFRAME 0x00000002U
+#define GRC_MODE_WORD_SWAP_NONFRAME 0x00000004U
 #define GRC_MISC_CFG            0x6804
 #define GRC_LOCAL_CTRL          0x6808
 #define GRC_EEPROM_ADDR         0x6838
@@ -132,16 +134,38 @@ static void bcm57xx_update_irq(BCM57xxState *s)
 
 static uint32_t bcm57xx_desc_load(BCM57xxState *s, const void *p)
 {
-    return (REG(s, GRC_MODE) & 2) ? ldl_be_p(p) : ldl_le_p(p);
+    return (REG(s, GRC_MODE) & GRC_MODE_BYTE_SWAP_NONFRAME) ?
+        ldl_be_p(p) : ldl_le_p(p);
 }
 
 static void bcm57xx_desc_store(BCM57xxState *s, void *p, uint32_t v)
 {
-    if (REG(s, GRC_MODE) & 2) {
+    if (REG(s, GRC_MODE) & GRC_MODE_BYTE_SWAP_NONFRAME) {
         stl_be_p(p, v);
     } else {
         stl_le_p(p, v);
     }
+}
+
+/* Swap 32-bit halves within each complete 64-bit non-frame DMA unit. */
+static void bcm57xx_dma_word_swap(BCM57xxState *s, uint8_t *buf, size_t len)
+{
+    if (!(REG(s, GRC_MODE) & GRC_MODE_WORD_SWAP_NONFRAME)) {
+        for (size_t i = 0; i + 8 <= len; i += 8) {
+            uint32_t word = ldl_le_p(buf + i);
+
+            stl_le_p(buf + i, ldl_le_p(buf + i + 4));
+            stl_le_p(buf + i + 4, word);
+        }
+    }
+}
+
+static void bcm57xx_bd_word_swap(BCM57xxState *s, uint8_t *buf, size_t len)
+{
+    /* Big-endian BDs keep the 64-bit host address high-word first. */
+    size_t offset = (REG(s, GRC_MODE) & GRC_MODE_BYTE_SWAP_NONFRAME) ? 8 : 0;
+
+    bcm57xx_dma_word_swap(s, buf + offset, len - offset);
 }
 
 static uint64_t bcm57xx_address(uint32_t hi, uint32_t lo)
@@ -178,6 +202,7 @@ static void bcm57xx_stats_dma(BCM57xxState *s)
     for (i = 0; i < sizeof(stats); i += 4) {
         bcm57xx_desc_store(s, stats + i, SRAM(s, 0x300 + i));
     }
+    bcm57xx_dma_word_swap(s, stats, sizeof(stats));
     if (pci_dma_write(&s->parent_obj, addr, stats, sizeof(stats))) {
         REG(s, 0x4c04) |= 8;
     }
@@ -188,6 +213,9 @@ static void bcm57xx_status(BCM57xxState *s, uint32_t flags, bool interrupt)
     uint8_t status[80] = { 0 };
     uint64_t addr = bcm57xx_address(REG(s, 0x3c38), REG(s, 0x3c3c));
     unsigned i, len = sizeof(status);
+    unsigned status_offset =
+        (REG(s, GRC_MODE) & GRC_MODE_WORD_SWAP_NONFRAME) ? 0 : 4;
+    unsigned tag_offset = status_offset ^ 4;
 
     if (!(REG(s, HOSTCC_MODE) & 2) || !bcm57xx_bus_master(s)) {
         return;
@@ -215,8 +243,13 @@ static void bcm57xx_status(BCM57xxState *s, uint32_t flags, bool interrupt)
     } else if (REG(s, HOSTCC_MODE) & 0x80) {
         len = 64;
     }
-    if (pci_dma_write(&s->parent_obj, addr + 4, status + 4, len - 4) ||
-        pci_dma_write(&s->parent_obj, addr, status, 4)) {
+    bcm57xx_dma_word_swap(s, status, len);
+    /* Publish Updated only after all indices and the tag are visible. */
+    if (pci_dma_write(&s->parent_obj, addr + 8, status + 8, len - 8) ||
+        pci_dma_write(&s->parent_obj, addr + tag_offset,
+                      status + tag_offset, 4) ||
+        pci_dma_write(&s->parent_obj, addr + status_offset,
+                      status + status_offset, 4)) {
         REG(s, 0x4c04) |= 8; /* DMA master abort */
         return;
     }
@@ -503,6 +536,7 @@ static ssize_t bcm57xx_receive(NetClientState *nc, const uint8_t *buf,
         REG(s, 0x4804) |= 8;
         return size;
     }
+    bcm57xx_bd_word_swap(s, desc, sizeof(desc));
     dataaddr = bcm57xx_address(bcm57xx_desc_load(s, desc),
                                bcm57xx_desc_load(s, desc + 4));
     idxlen = bcm57xx_desc_load(s, desc + 8);
@@ -536,6 +570,7 @@ static ssize_t bcm57xx_receive(NetClientState *nc, const uint8_t *buf,
                        bcm57xx_rx_checksum(frame, length - 4, &flags));
     bcm57xx_desc_store(s, desc + 12, flags);
     bcm57xx_desc_store(s, desc + 20, vlan);
+    bcm57xx_bd_word_swap(s, desc, sizeof(desc));
     retaddr = bcm57xx_address(SRAM(s, 0x200), SRAM(s, 0x204));
     if (pci_dma_write(&s->parent_obj, retaddr + s->rx_prod * 32,
                       desc, sizeof(desc))) {
@@ -683,6 +718,7 @@ static void bcm57xx_transmit(BCM57xxState *s, unsigned ring, bool host)
                 REG(s, 0x4804) |= 8;
                 break;
             }
+            bcm57xx_bd_word_swap(s, desc, sizeof(desc));
             dataaddr = bcm57xx_address(bcm57xx_desc_load(s, desc),
                                        bcm57xx_desc_load(s, desc + 4));
             lf = bcm57xx_desc_load(s, desc + 8);
@@ -782,6 +818,7 @@ static void bcm57xx_dma_queue(BCM57xxState *s, uint32_t off, bool read)
     if (read) {
         result = pci_dma_read(&s->parent_obj, addr, buf, len);
         if (result == MEMTX_OK) {
+            bcm57xx_dma_word_swap(s, buf, len);
             for (i = 0; i < len; i += 4) {
                 SRAM(s, nicaddr + i) = bcm57xx_desc_load(s, buf + i);
             }
@@ -790,6 +827,7 @@ static void bcm57xx_dma_queue(BCM57xxState *s, uint32_t off, bool read)
         for (i = 0; i < len; i += 4) {
             bcm57xx_desc_store(s, buf + i, SRAM(s, nicaddr + i));
         }
+        bcm57xx_dma_word_swap(s, buf, len);
         result = pci_dma_write(&s->parent_obj, addr, buf, len);
     }
     g_free(buf);
@@ -1285,10 +1323,6 @@ static int bcm57xx_post_load(void *opaque, int version_id)
 {
     BCM57xxState *s = opaque;
 
-    if (version_id < 2) {
-        bcm57xx_phy_reset(s);
-        bcm57xx_core_reset(s);
-    }
     if (s->rx_prod >= 2048 ||
         s->rx_cons[0] >= 512 || s->rx_cons[1] >= 256 ||
         s->rx_cons[2] >= 1024) {
@@ -1342,30 +1376,29 @@ static const VMStateDescription vmstate_bcm5704_coalescing = {
 static const VMStateDescription vmstate_bcm5701 = {
     .name = TYPE_BCM5701,
     .version_id = 2,
-    .minimum_version_id = 1,
+    .minimum_version_id = 2,
     .pre_load = bcm57xx_pre_load,
     .post_load = bcm57xx_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, BCM57xxState),
         VMSTATE_MACADDR(conf.macaddr, BCM57xxState),
-        VMSTATE_UINT32_ARRAY_V(regs, BCM57xxState,
-                               BCM57XX_MMIO_SIZE / 4, 2),
-        VMSTATE_UINT32_ARRAY_V(sram, BCM57xxState, BCM_SRAM_SIZE / 4, 2),
-        VMSTATE_UINT8_ARRAY_V(eeprom, BCM57xxState, BCM_EEPROM_SIZE, 2),
-        VMSTATE_UINT16_ARRAY_V(phy, BCM57xxState, 32, 2),
-        VMSTATE_UINT16_ARRAY_V(dsp, BCM57xxState, 0x10000, 2),
-        VMSTATE_UINT16_ARRAY_V(tx_cons, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT16_ARRAY_V(rx_cons, BCM57xxState, 3, 2),
-        VMSTATE_UINT16_V(rx_prod, BCM57xxState, 2),
-        VMSTATE_UINT8_V(status_tag, BCM57xxState, 2),
-        VMSTATE_UINT32_V(status_flags, BCM57xxState, 2),
-        VMSTATE_BOOL_V(irq_pending, BCM57xxState, 2),
-        VMSTATE_BOOL_V(irq_mailbox_mask, BCM57xxState, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_len, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_flags, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_vlan, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT8_2DARRAY_V(tx_buf, BCM57xxState, BCM_RINGS,
-                               BCM_MAX_TSO, 2),
+        VMSTATE_UINT32_ARRAY(regs, BCM57xxState, BCM57XX_MMIO_SIZE / 4),
+        VMSTATE_UINT32_ARRAY(sram, BCM57xxState, BCM_SRAM_SIZE / 4),
+        VMSTATE_UINT8_ARRAY(eeprom, BCM57xxState, BCM_EEPROM_SIZE),
+        VMSTATE_UINT16_ARRAY(phy, BCM57xxState, 32),
+        VMSTATE_UINT16_ARRAY(dsp, BCM57xxState, 0x10000),
+        VMSTATE_UINT16_ARRAY(tx_cons, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT16_ARRAY(rx_cons, BCM57xxState, 3),
+        VMSTATE_UINT16(rx_prod, BCM57xxState),
+        VMSTATE_UINT8(status_tag, BCM57xxState),
+        VMSTATE_UINT32(status_flags, BCM57xxState),
+        VMSTATE_BOOL(irq_pending, BCM57xxState),
+        VMSTATE_BOOL(irq_mailbox_mask, BCM57xxState),
+        VMSTATE_UINT32_ARRAY(tx_len, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT32_ARRAY(tx_flags, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT32_ARRAY(tx_vlan, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT8_2DARRAY(tx_buf, BCM57xxState, BCM_RINGS,
+                             BCM_MAX_TSO),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
@@ -1377,30 +1410,29 @@ static const VMStateDescription vmstate_bcm5701 = {
 static const VMStateDescription vmstate_bcm5704 = {
     .name = TYPE_BCM5704,
     .version_id = 2,
-    .minimum_version_id = 1,
+    .minimum_version_id = 2,
     .pre_load = bcm57xx_pre_load,
     .post_load = bcm57xx_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, BCM57xxState),
         VMSTATE_MACADDR(conf.macaddr, BCM57xxState),
-        VMSTATE_UINT32_ARRAY_V(regs, BCM57xxState,
-                               BCM57XX_MMIO_SIZE / 4, 2),
-        VMSTATE_UINT32_ARRAY_V(sram, BCM57xxState, BCM_SRAM_SIZE / 4, 2),
-        VMSTATE_UINT8_ARRAY_V(eeprom, BCM57xxState, BCM_EEPROM_SIZE, 2),
-        VMSTATE_UINT16_ARRAY_V(phy, BCM57xxState, 32, 2),
-        VMSTATE_UINT16_ARRAY_V(dsp, BCM57xxState, 0x10000, 2),
-        VMSTATE_UINT16_ARRAY_V(tx_cons, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT16_ARRAY_V(rx_cons, BCM57xxState, 3, 2),
-        VMSTATE_UINT16_V(rx_prod, BCM57xxState, 2),
-        VMSTATE_UINT8_V(status_tag, BCM57xxState, 2),
-        VMSTATE_UINT32_V(status_flags, BCM57xxState, 2),
-        VMSTATE_BOOL_V(irq_pending, BCM57xxState, 2),
-        VMSTATE_BOOL_V(irq_mailbox_mask, BCM57xxState, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_len, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_flags, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT32_ARRAY_V(tx_vlan, BCM57xxState, BCM_RINGS, 2),
-        VMSTATE_UINT8_2DARRAY_V(tx_buf, BCM57xxState, BCM_RINGS,
-                               BCM_MAX_TSO, 2),
+        VMSTATE_UINT32_ARRAY(regs, BCM57xxState, BCM57XX_MMIO_SIZE / 4),
+        VMSTATE_UINT32_ARRAY(sram, BCM57xxState, BCM_SRAM_SIZE / 4),
+        VMSTATE_UINT8_ARRAY(eeprom, BCM57xxState, BCM_EEPROM_SIZE),
+        VMSTATE_UINT16_ARRAY(phy, BCM57xxState, 32),
+        VMSTATE_UINT16_ARRAY(dsp, BCM57xxState, 0x10000),
+        VMSTATE_UINT16_ARRAY(tx_cons, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT16_ARRAY(rx_cons, BCM57xxState, 3),
+        VMSTATE_UINT16(rx_prod, BCM57xxState),
+        VMSTATE_UINT8(status_tag, BCM57xxState),
+        VMSTATE_UINT32(status_flags, BCM57xxState),
+        VMSTATE_BOOL(irq_pending, BCM57xxState),
+        VMSTATE_BOOL(irq_mailbox_mask, BCM57xxState),
+        VMSTATE_UINT32_ARRAY(tx_len, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT32_ARRAY(tx_flags, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT32_ARRAY(tx_vlan, BCM57xxState, BCM_RINGS),
+        VMSTATE_UINT8_2DARRAY(tx_buf, BCM57xxState, BCM_RINGS,
+                             BCM_MAX_TSO),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

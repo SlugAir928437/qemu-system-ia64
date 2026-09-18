@@ -14,7 +14,7 @@ from ia64.media import make_el_torito_iso, make_fat_disk
 
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
-    "root-device-path", "console-output",
+    "root-device-path", "console-output", "console-variables",
 }
 
 
@@ -30,6 +30,19 @@ class Ia64FirmwareSmoke(Ia64FirmwareTest):
             machine_options="firmware-console=serial,nvram=none")
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
         vm.cmd("system_reset")
+        self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+
+    def test_vga_console(self):
+        vm = self.launch_ia64(
+            media=self.make_disk("vga.img"),
+            machine_options="firmware-console=vga,nvram=none")
+        self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+
+    def test_serial_without_vga(self):
+        vm = self.launch_ia64(
+            media=self.make_disk("serial.img"),
+            machine_options="firmware-console=vga,nvram=none",
+            extra_args=("-vga", "none"))
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
 
     def test_icount_boot(self):

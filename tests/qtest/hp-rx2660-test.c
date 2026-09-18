@@ -1272,6 +1272,125 @@ static void test_hp_rx2660_default_usb_input(void)
     qtest_quit(qts);
 }
 
+static void rx2660_assert_usb_speed(QTestState *qts, unsigned int bus,
+                                     const char *port, unsigned int speed)
+{
+    g_autofree char *info = qtest_hmp(qts, "info usb");
+    g_auto(GStrv) lines = g_strsplit(info, "\n", -1);
+    g_autofree char *bus_prefix = g_strdup_printf("  Device %u.", bus);
+    g_autofree char *port_name = g_strdup_printf(", Port %s,", port);
+    g_autofree char *expected = g_strdup_printf("Speed %u Mb/s,", speed);
+    unsigned int i;
+
+    for (i = 0; lines[i]; i++) {
+        if (g_str_has_prefix(lines[i], bus_prefix) &&
+            strstr(lines[i], port_name)) {
+            g_assert_nonnull(strstr(lines[i], expected));
+            return;
+        }
+    }
+    g_error("USB bus %u port %s not found: %s", bus, port, info);
+}
+
+static void rx2660_assert_ehci_speed(QTestState *qts, uint64_t base,
+                                      unsigned int bus, unsigned int port,
+                                      bool usb1)
+{
+    uint64_t opregs = base + qtest_readb(qts, base + CAPLENGTH);
+    uint64_t portsc = opregs + 0x44 + (port - 1) * 4;
+    g_autofree char *path = g_strdup_printf("%u", port);
+
+    qtest_writel(qts, portsc, PORTSC_PPOWER | PORTSC_PRESET);
+    qtest_writel(qts, portsc, PORTSC_PPOWER);
+    g_test_message("USB bus %u port %u PORTSC=0x%x", bus, port,
+                   qtest_readl(qts, portsc));
+    rx2660_assert_usb_speed(qts, bus, path, usb1 ? 12 : 480);
+    g_assert_cmphex(qtest_readl(qts, portsc) & PORTSC_PED, ==,
+                    usb1 ? 0 : PORTSC_PED);
+    if (usb1) {
+        qtest_writel(qts, portsc, PORTSC_PPOWER | PORTSC_POWNER);
+    }
+}
+
+static void test_hp_rx2660_usb1(gconstpointer data)
+{
+    const uint64_t extra_mmio = UINT64_C(0x88040000);
+    bool usb1 = GPOINTER_TO_INT(data);
+    QTestState *qts = qtest_initf(
+        "-machine hp-rx2660,nvram=none,firmware=none%s "
+        "-m 1G -smp 1 -S -display none -serial none -monitor none -net none "
+        "-drive if=none,id=stick,file=null-co://,format=raw "
+        "-device usb-storage,drive=stick,bus=usb-bus.0,port=3 "
+        "-device ich9-usb-ehci1,id=extra-usb,bus=pci.0,addr=4 "
+        "-device pci-ohci,id=extra-ohci,bus=pci.0,addr=5,"
+        "masterbus=extra-usb.0,firstport=0,num-ports=6",
+        usb1 ? ",usb1=on" : "");
+    uint64_t opregs = RX2660_EHCI_MMIO +
+        qtest_readb(qts, RX2660_EHCI_MMIO + CAPLENGTH);
+    g_autoptr(QDict) response = NULL;
+    unsigned int pass, port;
+
+    g_assert_cmpint(qtest_qom_get_bool(qts, "/machine", "usb1"), ==, usb1);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    qtest_writel(qts, opregs + CONFIGFLAG, 1);
+
+    qtest_qmp_device_add(qts, "usb-hub", "hub",
+                        "{'bus':'usb-bus.0','port':'4'}");
+    qtest_qmp_device_add(qts, "usb-kbd", "hub-keyboard",
+                        "{'bus':'usb-bus.0','port':'4.1'}");
+    qtest_qmp_device_add(qts, "usb-mouse", "mouse",
+                        "{'bus':'usb-bus.0','port':'5'}");
+    qtest_qmp_device_add(qts, "usb-bot", "extra-storage",
+                        "{'bus':'extra-usb.0','port':'1'}");
+    qtest_qom_set_bool(qts, "extra-storage", "attached", true);
+
+    for (pass = 0; pass < 2; pass++) {
+        uint64_t extra_opregs;
+
+        rx2660_config_writel(qts, 0, PCI_DEVFN(4, 0),
+                             PCI_BASE_ADDRESS_0, extra_mmio);
+        rx2660_config_writew(qts, 0, PCI_DEVFN(4, 0), PCI_COMMAND,
+                             PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+        g_assert_cmphex(qtest_readb(qts, extra_mmio + CAPLENGTH), ==, 0x20);
+        extra_opregs = extra_mmio + qtest_readb(qts, extra_mmio + CAPLENGTH);
+        qtest_writel(qts, extra_opregs + CONFIGFLAG, 1);
+        qtest_writel(qts, opregs + CONFIGFLAG, 1);
+        for (port = 1; port <= 3; port++) {
+            rx2660_assert_ehci_speed(qts, RX2660_EHCI_MMIO, 0, port, usb1);
+        }
+        rx2660_assert_ehci_speed(qts, RX2660_EHCI_MMIO, 0, 5, usb1);
+        rx2660_assert_usb_speed(qts, 0, "4.1", 12);
+        rx2660_assert_ehci_speed(qts, extra_mmio, 1, 1, usb1);
+        if (pass == 0) {
+            qtest_system_reset(qts);
+        }
+    }
+
+    qtest_qmp_device_add(qts, "usb-uas", "uas",
+                        "{'bus':'extra-usb.0','port':'2'}");
+    if (usb1) {
+        response = qtest_qmp_assert_failure_ref(qts,
+            "{'execute':'qom-set','arguments':{'path':'uas',"
+            "'property':'attached','value':true}}");
+        g_assert_nonnull(strstr(qdict_get_str(response, "desc"),
+                                "speed mismatch"));
+        qobject_unref(response);
+        response = NULL;
+    } else {
+        qtest_qom_set_bool(qts, "uas", "attached", true);
+        rx2660_assert_usb_speed(qts, 1, "2", 480);
+    }
+    qtest_qmp_device_del(qts, "uas");
+
+    response = qtest_qmp_assert_failure_ref(qts,
+        "{'execute':'qom-set','arguments':{'path':'/machine',"
+        "'property':'usb1','value':%i}}", !usb1);
+    g_assert_nonnull(strstr(qdict_get_str(response, "desc"),
+                            "machine initialization"));
+    g_assert_cmpint(qtest_qom_get_bool(qts, "/machine", "usb1"), ==, usb1);
+    qtest_quit(qts);
+}
+
 static void test_hp_rx2660_ohci_port_resume(void)
 {
     QTestState *qts = qtest_init(
@@ -1559,6 +1678,10 @@ int main(int argc, char **argv)
                    test_hp_rx2660_cpu_topology);
     qtest_add_func("/hp-rx2660/default-usb-input",
                    test_hp_rx2660_default_usb_input);
+    qtest_add_data_func("/hp-rx2660/usb1/default", GINT_TO_POINTER(0),
+                       test_hp_rx2660_usb1);
+    qtest_add_data_func("/hp-rx2660/usb1/enabled", GINT_TO_POINTER(1),
+                       test_hp_rx2660_usb1);
     qtest_add_func("/hp-rx2660/ohci-port-resume",
                    test_hp_rx2660_ohci_port_resume);
     qtest_add_func("/hp-rx2660/nec-usb-routing", test_hp_zx_nec_usb_routing);

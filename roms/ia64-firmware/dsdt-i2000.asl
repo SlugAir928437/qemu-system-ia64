@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+// Compile with iasl -oi to encode numeric _PRT zeros as ByteConst objects.
+
 DefinitionBlock ("", "DSDT", 2, "QEMU  ", "I2K4DSDT", 0x00000001)
 {
     Name (_S5, Package (0x04)
@@ -39,9 +41,9 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "I2K4DSDT", 0x00000001)
             })
             Name (_PRT, Package ()
             {
-                Package () { 0x0004FFFF, 0, Zero, 16 },
-                Package () { 0x0005FFFF, 0, Zero, 16 },
-                Package () { 0x0003FFFF, 3, Zero, 19 }
+                Package () { 0x0004FFFF, 0, 0, 16 },
+                Package () { 0x0005FFFF, 0, 0, 16 },
+                Package () { 0x0003FFFF, 3, 0, 19 }
             })
 
             Device (IFB0)
@@ -56,6 +58,18 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "I2K4DSDT", 0x00000001)
                     {
                         IO (Decode16, 0x03F8, 0x03F8, 1, 8)
                         IRQ (Edge, ActiveHigh, Exclusive) {4}
+                    })
+                }
+
+                Device (LPT1)
+                {
+                    Name (_HID, EisaId ("PNP0401"))
+                    Name (_CID, EisaId ("PNP0400"))
+                    Name (_CRS, ResourceTemplate ()
+                    {
+                        IO (Decode16, 0x0378, 0x0378, 1, 3)
+                        IO (Decode16, 0x0778, 0x0778, 1, 3)
+                        IRQ (Level, ActiveHigh, Exclusive) {7}
                     })
                 }
 
@@ -102,7 +116,7 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "I2K4DSDT", 0x00000001)
             })
             Name (_PRT, Package ()
             {
-                Package () { 0x0000FFFF, 0, Zero, 20 }
+                Package () { 0x0000FFFF, 0, 0, 20 }
             })
         }
 
@@ -158,7 +172,7 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "I2K4DSDT", 0x00000001)
             })
             Name (_PRT, Package ()
             {
-                Package () { 0x0000FFFF, 0, Zero, 28 }
+                Package () { 0x0000FFFF, 0, 0, 28 }
             })
         }
     }

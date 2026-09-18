@@ -67,6 +67,9 @@
 #define E100_CB_STATUS_C BIT(15)
 #define E100_CB_STATUS_OK BIT(13)
 #define E100_RFD_STATUS_MULTICAST BIT(1)
+#define E100_RFD_STATUS_TYPE BIT(5)
+#define E100_RFD_COUNT_F BIT(14)
+#define E100_RFD_COUNT_EOF BIT(15)
 #define E100_CB_STATUS_COMPLETE \
     (E100_CB_STATUS_C | E100_CB_STATUS_OK)
 #define E100_CB_LINK_OFFSET 0x04U
@@ -943,10 +946,12 @@ static void test_i82559_tx_rx_multicast_reset(void)
     io_test_socket_send_frame(socket_fd, allowed_frame, sizeof(allowed_frame));
     status = io_test_i82559_wait_descriptor(qts, E100_TEST_RX_RFD);
     g_assert_cmphex(status, ==,
-                    E100_CB_STATUS_COMPLETE | E100_RFD_STATUS_MULTICAST);
+                    E100_CB_STATUS_COMPLETE | E100_RFD_STATUS_MULTICAST |
+                    E100_RFD_STATUS_TYPE);
     g_assert_cmpuint(qtest_readw(qts, E100_TEST_RX_RFD +
                                 E100_RFD_COUNT_OFFSET), ==,
-                     sizeof(allowed_frame));
+                     sizeof(allowed_frame) | E100_RFD_COUNT_F |
+                     E100_RFD_COUNT_EOF);
     qtest_memread(qts, E100_TEST_RX_RFD + E100_CB_PAYLOAD_OFFSET,
                   rx_data, sizeof(rx_data));
     g_assert_cmpmem(rx_data, sizeof(rx_data), allowed_frame,
@@ -975,7 +980,8 @@ static void test_i82559_tx_rx_multicast_reset(void)
 
     io_test_socket_send_frame(socket_fd, unicast_frame, sizeof(unicast_frame));
     status = io_test_i82559_wait_descriptor(qts, E100_TEST_RESET_RFD);
-    g_assert_cmphex(status, ==, E100_CB_STATUS_COMPLETE);
+    g_assert_cmphex(status, ==,
+                    E100_CB_STATUS_COMPLETE | E100_RFD_STATUS_TYPE);
     qtest_memread(qts, E100_TEST_RESET_RFD + E100_CB_PAYLOAD_OFFSET,
                   rx_data, sizeof(rx_data));
     g_assert_cmpmem(rx_data, sizeof(rx_data), unicast_frame,
@@ -1448,10 +1454,12 @@ static void test_i82559_traffic_migration(void)
     io_test_socket_send_frame(socket_fd, allowed_frame, sizeof(allowed_frame));
     status = io_test_i82559_wait_descriptor(qts, E100_TEST_RX_RFD);
     g_assert_cmphex(status, ==,
-                    E100_CB_STATUS_COMPLETE | E100_RFD_STATUS_MULTICAST);
+                    E100_CB_STATUS_COMPLETE | E100_RFD_STATUS_MULTICAST |
+                    E100_RFD_STATUS_TYPE);
     g_assert_cmpuint(qtest_readw(qts, E100_TEST_RX_RFD +
                                 E100_RFD_COUNT_OFFSET), ==,
-                     sizeof(allowed_frame));
+                     sizeof(allowed_frame) | E100_RFD_COUNT_F |
+                     E100_RFD_COUNT_EOF);
     qtest_memread(qts, E100_TEST_RX_RFD + E100_CB_PAYLOAD_OFFSET,
                   rx_data, sizeof(rx_data));
     g_assert_cmpmem(rx_data, sizeof(rx_data), allowed_frame,
