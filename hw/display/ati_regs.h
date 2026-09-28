@@ -774,6 +774,9 @@
 
 #define BUS_MASTER_DIS                          0x00000040
 #define PM4_BUFFER_CNTL_NONPM4                  0x00000000
+#define PM4_BUFFER_DL_DONE                      BIT(31)
+#define PM4_STAT_BUSY                           BIT(16)
+#define PM4_MICRO_FREERUN                       BIT(30)
 
 /* DP_DATATYPE bit constants */
 #define DST_8BPP                                0x00000002

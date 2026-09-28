@@ -146,6 +146,8 @@ qtests_alpha = ['boot-serial-test'] + \
 qtests_avr = [ 'boot-serial-test' ]
 
 qtests_ia64 = ['ia64-vpc-test'] + \
+  (config_all_devices.has_key('CONFIG_IA64_VPC_STORAGE') ? \
+   ['ia64-storage-dma-test'] : []) + \
   (config_all_devices.has_key('CONFIG_BCM5704_PCI') ? \
    ['bcm5704-test'] : []) + \
   (config_all_devices.has_key('CONFIG_HP_I2000') ? \

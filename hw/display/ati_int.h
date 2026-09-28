@@ -40,6 +40,7 @@
 #define ATI_R100_MMIO_SIZE (64 * KiB)
 #define ATI_HOST_DATA_BANK_DWORDS 4
 #define ATI_2D_MAX_PIXELS (16U * 1024U * 1024U)
+#define ATI_CCE_MAX_DEPTH 4
 #define ATI_3D_CONTEXT_DWORDS 128
 #define ATI_3D_FOG_TABLE_ENTRIES 256
 #define ATI_3D_MAX_VERTEX_DWORDS 4096
@@ -133,6 +134,39 @@ typedef struct ATIVGARegs {
     uint16_t default_sc_right;
     uint32_t default_tile;
 } ATIVGARegs;
+
+typedef struct ATICCEStream {
+    uint64_t base;
+    uint32_t pos;
+    uint32_t remaining;
+    uint32_t mask;
+    uint32_t header;
+    uint32_t packet_count;
+    uint32_t packet_index;
+} ATICCEStream;
+
+typedef struct ATICCEState {
+    uint32_t pci_gart_page;
+    uint32_t buffer_offset;
+    uint32_t buffer_cntl;
+    uint32_t buffer_wm_cntl;
+    uint32_t rptr_addr;
+    uint32_t rptr;
+    uint32_t wptr;
+    uint32_t ind_offset;
+    uint32_t ind_size;
+    uint32_t micro_cntl;
+    uint32_t scratch[6];
+    uint32_t gen_reset_cntl;
+    ATICCEStream streams[ATI_CCE_MAX_DEPTH + 1];
+    uint32_t stream_count;
+    bool halted;
+    /* Per-operation work limits, never migrated. */
+    uint64_t command_budget;
+    uint64_t blit_budget;
+    bool processing;
+    bool budget_exhausted;
+} ATICCEState;
 
 typedef struct ATIHostDataState {
     bool active;
@@ -274,6 +308,9 @@ struct ATIVGAState {
     bool blt_row_buffer_busy;
     ATI3DState r100_3d;
     uint64_t r100_state_generation;
+    ATICCEState cce;
+    QEMUTimer cce_timer;
+    uint64_t cce_generation;
     bool default_rom;
 };
 
@@ -308,6 +345,15 @@ bool ati_3d_read(ATIVGAState *s, hwaddr addr, uint64_t *data,
 bool ati_3d_write(ATIVGAState *s, hwaddr addr, uint64_t data,
                   unsigned int size);
 void ati_3d_reset(ATIVGAState *s);
+bool ati_cce_read(ATIVGAState *s, hwaddr addr, uint64_t *data,
+                  unsigned int size);
+bool ati_cce_write(ATIVGAState *s, hwaddr addr, uint64_t data,
+                   unsigned int size);
+void ati_cce_reset(ATIVGAState *s);
+void ati_cce_init(ATIVGAState *s);
+int ati_cce_post_load(ATIVGAState *s);
+bool ati_cce_consume_work(ATIVGAState *s, uint64_t work, bool blit);
+extern const VMStateDescription vmstate_ati_cce;
 int ati_3d_post_load(ATIVGAState *s);
 bool ati_3d_consume_command_work(ATIVGAState *s, uint64_t work);
 bool ati_3d_consume_2d_work(ATIVGAState *s, uint64_t work);
