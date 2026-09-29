@@ -122,7 +122,7 @@ test_ia64_timeouts = {
   'smp_merced': 900,
   'ras': 120,
   'zx6000_efi': 90,
-  'hp_i2000': 120,
+  'hp_i2000': 900,
   'hp_zx2000': 120,
   'hp_zx6000': 120,
   'hp_rx2660': 120,

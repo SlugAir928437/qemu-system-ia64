@@ -94,6 +94,12 @@ class Ia64BootShell(Ia64FirmwareTest):
             machine_options=f"firmware-console=serial,nvram={nvram}")
         self._open_shell(vm, "f2")
         self._command(vm, "info", "NVRAM backing:  persistent")
+        for command in ("edd30", "edd30 on", "edd30 off"):
+            self._command(
+                vm, command,
+                "EDD30 is available only for SCSI devices on HP i2000.")
+            wait_for_console_pattern(self, "Command failed: UNSUPPORTED",
+                                     vm=vm)
         self._command(vm, "map", "fs0:")
         self._command(vm, r"ls fs0:\EFI\BOOT", "BOOTIA64.EFI")
         self._command(vm, "date 2024-02-29", "2024-02-29")
@@ -110,6 +116,7 @@ class Ia64BootShell(Ia64FirmwareTest):
         vm.shutdown()
 
         contents = nvram.read_bytes()
+        self.assertNotIn("EDD30\0".encode("utf-16le"), contents)
         self.assertIn("BootOrder".encode("utf-16le") + b"\0\0", contents)
         self.assertIn(b"IRT64OFT", contents)
 

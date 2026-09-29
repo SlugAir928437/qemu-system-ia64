@@ -1816,7 +1816,7 @@ static void test_i2000_profile_valid(void)
     g_assert_false(le32_to_cpu(profile->Flags) &
                    IA64_I2000_PROFILE_FLAG_EFI_TIME_UNAVAILABLE);
     g_assert_cmpuint(profile->IdeUnitMask, ==,
-                     IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK);
+                     IA64_I2000_PROFILE_IDE_UNIT_MASK);
     g_assert_cmphex(le64_to_cpu(descriptor->NvramBase), ==,
                     IA64_I2000_PROFILE_NVRAM_BASE);
     g_assert_cmphex(le64_to_cpu(descriptor->NvramSize), ==,

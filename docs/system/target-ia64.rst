@@ -299,6 +299,29 @@ drives without an explicit interface use the LSI53C895A SCSI controller.
 ``itanium2-vpc`` also provides AHCI; attach
 AHCI media with ``if=none`` and an explicit ``ide-hd`` or ``ide-cd`` device.
 
+The i2000 firmware enumerates both ISP12160 channels, targets 0--15 except
+initiator ID 7, and LUNs 0--31.  It also enumerates master and slave devices
+on both IDE channels.  Disks and optical drives may be mixed.  Each device
+has its own Block I/O handle; supported FAT partitions, whole-disk FAT,
+ISO9660/UDF volumes and El Torito FAT images appear in the EFI shell's
+``map`` output.  Use ``ls fsN:\`` to browse a volume and ``boot fsN:`` to
+load its ``\EFI\BOOT\BOOTIA64.EFI``.
+
+For example, attach a disk to the second SCSI channel at target 3, LUN 1::
+
+  -drive if=none,id=disk1,file=/path/to/disk1.qcow2,format=qcow2 \
+  -device scsi-hd,bus=isp12160-scsi.0,channel=1,scsi-id=3,lun=1,drive=disk1
+
+In the i2000 shell, ``edd30`` shows the saved SCSI device-path mode.
+``edd30 on`` selects native SCSI paths (the default); ``edd30 off`` selects
+EDD vendor paths.  Changes take effect after a reset and persist when
+NVRAM has a backing file.  Other machines report that the command is
+unsupported.
+EDD drive numbers are unique within each device class: disks use
+0x80--0xdf and optical drives use 0xe0--0xff.  Devices beyond these ranges
+remain available through native SCSI paths.  Adding or removing devices
+can change EDD numbering and the shell's ``fsN:`` assignments.
+
 Windows host clock resolution
 -----------------------------
 

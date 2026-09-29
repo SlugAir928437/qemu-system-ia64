@@ -102,7 +102,7 @@ void ia64_platform_i2000_profile_init(
     profile->IdeFunction = IA64_I2000_PROFILE_IDE_FUNCTION;
     profile->IdeProgIf = IA64_I2000_PROFILE_IDE_PROG_IF;
     profile->IdeIrq = IA64_I2000_PROFILE_IDE_IRQ;
-    profile->IdeUnitMask = IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK;
+    profile->IdeUnitMask = IA64_I2000_PROFILE_IDE_UNIT_MASK;
     profile->IdeCommandSize = IA64_I2000_PROFILE_IDE_COMMAND_SIZE;
     profile->IdeControlSize = IA64_I2000_PROFILE_IDE_CONTROL_SIZE;
     profile->Isp12160Capabilities = cpu_to_le32(

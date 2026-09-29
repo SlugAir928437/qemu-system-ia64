@@ -110,8 +110,7 @@ static inline BOOLEAN fw_i2000_ide_policy_init(
         Profile->IdeControlPort != IA64_I2000_PROFILE_IDE_CONTROL_PORT ||
         Profile->IdeControlSize != IA64_I2000_PROFILE_IDE_CONTROL_SIZE ||
         Profile->IdeIrq != IA64_I2000_PROFILE_IDE_IRQ ||
-        Profile->IdeUnitMask !=
-            IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK ||
+        Profile->IdeUnitMask == 0 ||
         Profile->IdeDevice >= 32U || Profile->IdeFunction >= 8U ||
         !fw_ide_policy_port_range_valid(Profile->IdeCommandPort,
                                         Profile->IdeCommandSize) ||

@@ -142,6 +142,7 @@ extern const UINT8 mSimpleFileSystemProtocolGuid[16];
 extern const UINT8 mFileInfoGuid[16];
 extern const UINT8 mFileSystemInfoGuid[16];
 extern const UINT8 mEfiGlobalVariableGuid[16];
+extern const UINT8 mBlockIoProtocolGuid[16];
 
 UINT8 fw_ascii_upper(UINT8 value);
 void efi_conout_ascii(const CHAR8 *string);
@@ -191,6 +192,7 @@ EFI_STATUS fw_boot_image_from_boot_option(UINT16 option_number);
 UINTN fw_partition_count(VOID);
 UINTN fw_processor_count(VOID);
 UINT64 fw_installed_ram_size(VOID);
+BOOLEAN fw_i2000_profile_enabled(void);
 BOOLEAN fw_handoff_vga_console_primary(VOID);
 UINT32 fw_graphics_width(VOID);
 UINT32 fw_graphics_height(VOID);

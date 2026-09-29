@@ -25,10 +25,40 @@ typedef struct {
 
 typedef struct {
     FW_DEVICE_PATH_NODE Header;
+    UINT32 Controller;
+} __attribute__((packed)) FW_CONTROLLER_DEVICE_PATH_NODE;
+
+typedef struct {
+    FW_DEVICE_PATH_NODE Header;
     UINT32 MemoryType;
     EFI_PHYSICAL_ADDRESS StartingAddress;
     EFI_PHYSICAL_ADDRESS EndingAddress;
 } __attribute__((packed)) FW_MEMORY_MAPPED_DEVICE_PATH_NODE;
+
+/*
+ * EDD vendor path with a 32-bit drive number: efivar's efidp_edd10 in
+ * src/include/efivar/efivar-dp.h.
+ */
+#define FW_EDD_DEVICE_PATH_GUID_BYTES { \
+    0xc5, 0xfa, 0x31, 0xcf, 0x4e, 0xc2, 0xd2, 0x11, \
+    0x85, 0xf3, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b \
+}
+
+typedef struct {
+    FW_DEVICE_PATH_NODE Header;
+    UINT8 Guid[16];
+    UINT32 DriveNumber;
+} __attribute__((packed)) FW_EDD_DEVICE_PATH_NODE;
+
+static inline VOID fw_edd_device_path_init(FW_EDD_DEVICE_PATH_NODE *Node,
+                                           UINT32 DriveNumber)
+{
+    *Node = (FW_EDD_DEVICE_PATH_NODE) {
+        .Header = { 1, 4, sizeof(*Node) },
+        .Guid = FW_EDD_DEVICE_PATH_GUID_BYTES,
+        .DriveNumber = DriveNumber,
+    };
+}
 
 #define FW_SAS_DEVICE_PATH_GUID_BYTES { \
     0xb4, 0xdd, 0x87, 0xd4, 0x8b, 0x00, 0xd9, 0x11, \

@@ -658,13 +658,25 @@ def _write_udf_file(image: bytearray, icb: int, parent_icb: int,
     image[start:start + len(data)] = data
 
 
-def make_udf_bridge_iso(path: str | Path, efi_app: str | Path) -> MediaInfo:
+def make_udf_bridge_iso(path: str | Path, efi_app: str | Path, *,
+                        extra_boot_files: tuple[
+                            tuple[bytes, str | Path], ...] = ()) -> MediaInfo:
     """Create a UDF bridge with native and El Torito EFI boot paths."""
     path = Path(path)
     image = bytearray(UDF_TOTAL_SECTORS * ISO_SECTOR_SIZE)
     efi_image = Path(efi_app).read_bytes()
+    extra_contents = tuple(
+        (name, Path(source).read_bytes()) for name, source in extra_boot_files)
     fat, _ = _fat_volume(efi_image, sectors=256,
-                         fat_sectors=4, root_entries=64)
+                         fat_sectors=4, root_entries=64,
+                         extra_boot_files=extra_contents)
+    files = [("BOOTIA64.EFI", efi_image)]
+    for name, contents in extra_contents:
+        stem = name[:8].decode("ascii").rstrip()
+        extension = name[8:].decode("ascii").rstrip()
+        files.append((stem + ("." + extension if extension else ""), contents))
+    if UDF_APP_ICB + len(files) > UDF_APP_DATA:
+        raise ValueError("Too many EFI applications for UDF file entries")
 
     _write_iso9660(image, UDF_TOTAL_SECTORS, 24, 26)
     _write_el_torito(image, UDF_CATALOG_LBA, UDF_BOOT_LBA, 0xEF, fat)
@@ -765,7 +777,7 @@ def make_udf_bridge_iso(path: str | Path, efi_app: str | Path) -> MediaInfo:
     struct.pack_into("<I", integrity, 76, 46)
     struct.pack_into("<II", integrity, 80, 0, UDF_PARTITION_LENGTH)
     _write_regid(integrity, 88, "*QEMU IA64", 0x0201)
-    struct.pack_into("<IIHHH", integrity, 120, 1, 3,
+    struct.pack_into("<IIHHH", integrity, 120, len(files), 3,
                      0x0201, 0x0201, 0x0201)
     _finish_udf_tag(integrity, 9, UDF_INTEGRITY_LBA, 118)
     file_set = _iso_sector(image, UDF_PARTITION_START)
@@ -790,15 +802,18 @@ def make_udf_bridge_iso(path: str | Path, efi_app: str | Path) -> MediaInfo:
         _udf_fid("", directory | parent, UDF_ROOT_ICB, UDF_EFI_ICB),
         _udf_fid("BOOT", directory, UDF_BOOT_ICB, UDF_EFI_ICB),
     ))
-    boot_data = b"".join((
-        _udf_fid("", directory | parent, UDF_EFI_ICB, UDF_BOOT_ICB),
-        _udf_fid("BOOTIA64.EFI", 0, UDF_APP_ICB, UDF_BOOT_ICB),
-    ))
+    boot_data = _udf_fid("", directory | parent, UDF_EFI_ICB, UDF_BOOT_ICB)
+    boot_data += b"".join(
+        _udf_fid(name, 0, UDF_APP_ICB + index, UDF_BOOT_ICB)
+        for index, (name, _) in enumerate(files))
     _write_udf_directory(image, UDF_ROOT_ICB, UDF_ROOT_ICB, root_data)
     _write_udf_directory(image, UDF_EFI_ICB, UDF_ROOT_ICB, efi_data)
     _write_udf_directory(image, UDF_BOOT_ICB, UDF_EFI_ICB, boot_data)
-    _write_udf_file(image, UDF_APP_ICB, UDF_BOOT_ICB,
-                    UDF_APP_DATA, efi_image)
+    data_block = UDF_APP_DATA
+    for index, (_, contents) in enumerate(files):
+        _write_udf_file(image, UDF_APP_ICB + index, UDF_BOOT_ICB,
+                        data_block, contents)
+        data_block += (len(contents) + ISO_SECTOR_SIZE - 1) // ISO_SECTOR_SIZE
 
     path.write_bytes(image)
     return MediaInfo(path, file_sha256(path))
