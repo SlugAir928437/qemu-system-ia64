@@ -64,7 +64,8 @@ SECTIONS
     .bss.runtime (NOLOAD) : ALIGN(16) {
         /* RETAIN_BSS */
     } :runtime
-    . = ALIGN(0x2000);
+    /* Align the reclaimable boot region to a 128 KiB boundary. */
+    . = ALIGN(0x20000);
     __runtime_end = .;
     __boot_start = .;
     .text : { *(.text*) } :boot

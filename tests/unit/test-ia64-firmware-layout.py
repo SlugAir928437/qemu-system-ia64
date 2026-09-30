@@ -12,6 +12,7 @@ import sys
 FW_LOAD_BASE = 0x00100000
 FW_MAX_SPAN = 0x00200000
 RUNTIME_ALIGNMENT = 0x2000
+BOOT_ALIGNMENT = 0x20000
 
 
 def command(argv: list[str]) -> str:
@@ -62,7 +63,8 @@ def run_checks(binary: str, elf: str):
     required = ("_start", "_end", "_bss_end", "__firmware_payload_end",
                 "__gp", "pal_proc_entry",
                 "sal_proc_gp_anchor", "sal_proc_entry", "sal_proc_dispatch",
-                "__runtime_code_start", "__runtime_data_start")
+                "__runtime_code_start", "__runtime_data_start",
+                "__runtime_end", "__boot_start", "__boot_end")
     missing = [name for name in required if name not in sym]
     if missing:
         raise RuntimeError("missing ABI linker symbols: " + ", ".join(missing))
@@ -101,7 +103,11 @@ def run_checks(binary: str, elf: str):
             not (sym["pal_proc_entry"] < sym["__runtime_code_start"] <=
                  sym["__runtime_data_start"] < sym["__runtime_end"]):
         raise RuntimeError("runtime section boundary/alignment is invalid")
-    yield "PAL and runtime boundaries are valid"
+    if sym["__boot_start"] % BOOT_ALIGNMENT or \
+            not (sym["__runtime_end"] == sym["__boot_start"] <
+                 sym["__boot_end"] == sym["_end"]):
+        raise RuntimeError("reclaimable boot region boundary/alignment is invalid")
+    yield "PAL, runtime, and reclaimable boot boundaries are valid"
 
     if not (sym["__runtime_code_start"] <= sym["sal_proc_gp_anchor"] <
             sym["__runtime_data_start"] and
