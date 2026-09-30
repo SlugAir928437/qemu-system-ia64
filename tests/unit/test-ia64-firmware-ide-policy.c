@@ -24,7 +24,7 @@ static void init_profile(IA64PlatformI2000Profile *profile)
         .IdeFunction = IA64_I2000_PROFILE_IDE_FUNCTION,
         .IdeProgIf = IA64_I2000_PROFILE_IDE_PROG_IF,
         .IdeIrq = IA64_I2000_PROFILE_IDE_IRQ,
-        .IdeUnitMask = IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK,
+        .IdeUnitMask = IA64_I2000_PROFILE_IDE_UNIT_MASK,
         .IdeCommandSize = IA64_I2000_PROFILE_IDE_COMMAND_SIZE,
         .IdeControlSize = IA64_I2000_PROFILE_IDE_CONTROL_SIZE,
     };
@@ -43,9 +43,9 @@ static int test_fixed_policy(void)
         policy.ProgIf != 0x80U || policy.CommandPort != 0x01f0U ||
         policy.CommandSize != 8 || policy.ControlPort != 0x03f6U ||
         policy.ControlSize != 1 || policy.Irq != 14 ||
-        policy.UnitMask != 1 ||
+        policy.UnitMask != 3 ||
         !fw_ide_policy_unit_enabled(&policy, 0) ||
-        fw_ide_policy_unit_enabled(&policy, 1) ||
+        !fw_ide_policy_unit_enabled(&policy, 1) ||
         fw_ide_policy_unit_enabled(&policy, 2)) {
         return 1;
     }
@@ -106,7 +106,7 @@ static int test_rejections(void)
         return 1;
     }
     init_profile(&profile);
-    profile.IdeUnitMask = 3;
+    profile.IdeUnitMask = 4;
     if (fw_i2000_ide_policy_init(&profile, &policy)) {
         return 1;
     }

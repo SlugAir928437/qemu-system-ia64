@@ -151,13 +151,18 @@ static BOOLEAN fw_aml_name_char(CHAR8 character)
         (character >= '0' && character <= '9');
 }
 
-/* This firmware namespace uses an optional root prefix and one NameSeg. */
-static BOOLEAN fw_aml_namestring(const CHAR8 *name, UINT8 bytes[5],
+#define FW_AML_MAX_NAME_SEGMENTS 4U
+#define FW_AML_MAX_NAME_SIZE (3U + 4U * FW_AML_MAX_NAME_SEGMENTS)
+
+static BOOLEAN fw_aml_namestring(const CHAR8 *name,
+                                 UINT8 bytes[FW_AML_MAX_NAME_SIZE],
                                  UINTN *length)
 {
+    UINT8 segments[4U * FW_AML_MAX_NAME_SEGMENTS];
     UINTN input = 0;
     UINTN output = 0;
-    UINTN segment = 0;
+    UINTN count = 0;
+    UINTN i;
 
     if (name == NULL || bytes == NULL || length == NULL) {
         return 0;
@@ -166,21 +171,42 @@ static BOOLEAN fw_aml_namestring(const CHAR8 *name, UINT8 bytes[5],
         bytes[output++] = FW_AML_ROOT_CHAR;
         input++;
     }
-    while (segment < 4U && name[input] != '\0') {
-        CHAR8 character = name[input++];
+    for (;;) {
+        UINTN segment = 0;
 
-        if ((segment == 0 && !fw_aml_name_lead(character)) ||
-            (segment != 0 && !fw_aml_name_char(character))) {
+        if (count == FW_AML_MAX_NAME_SEGMENTS) {
             return 0;
         }
-        bytes[output++] = (UINT8)character;
-        segment++;
+        while (name[input] != '\0' && name[input] != '.') {
+            CHAR8 character = name[input++];
+
+            if (segment == 4U ||
+                (segment == 0 && !fw_aml_name_lead(character)) ||
+                (segment != 0 && !fw_aml_name_char(character))) {
+                return 0;
+            }
+            segments[count * 4U + segment++] = (UINT8)character;
+        }
+        if (segment == 0) {
+            return 0;
+        }
+        while (segment < 4U) {
+            segments[count * 4U + segment++] = '_';
+        }
+        count++;
+        if (name[input] == '\0') {
+            break;
+        }
+        input++;
     }
-    if (segment == 0 || name[input] != '\0') {
-        return 0;
+    if (count == 2U) {
+        bytes[output++] = 0x2eU; /* DualNamePrefix */
+    } else if (count > 2U) {
+        bytes[output++] = 0x2fU; /* MultiNamePrefix */
+        bytes[output++] = (UINT8)count;
     }
-    while (segment++ < 4U) {
-        bytes[output++] = '_';
+    for (i = 0; i < count * 4U; i++) {
+        bytes[output++] = segments[i];
     }
     *length = output;
     return 1;
@@ -191,7 +217,7 @@ static BOOLEAN fw_aml_begin_named_package(FWAcpiAmlBuilder *builder,
                                           UINTN opcode_size,
                                           const CHAR8 *name)
 {
-    UINT8 namestring[5];
+    UINT8 namestring[FW_AML_MAX_NAME_SIZE];
     UINTN name_size;
     UINTN i;
     UINT8 *bytes;
@@ -336,7 +362,7 @@ BOOLEAN fw_acpi_aml_package_end(FWAcpiAmlBuilder *builder)
 
 BOOLEAN fw_acpi_aml_name(FWAcpiAmlBuilder *builder, const CHAR8 *name)
 {
-    UINT8 namestring[5];
+    UINT8 namestring[FW_AML_MAX_NAME_SIZE];
     UINTN name_size;
     UINTN i;
     UINT8 *bytes;
@@ -398,6 +424,25 @@ BOOLEAN fw_acpi_aml_integer(FWAcpiAmlBuilder *builder, UINT64 value)
         return 0;
     }
     fw_aml_write_integer(bytes, value);
+    return 1;
+}
+
+/*
+ * Some older AML consumers reject ZeroOp and OneOp in _PRT packages.  Encode
+ * small values as ByteConst objects, matching the static i2000 DSDT.
+ */
+static BOOLEAN fw_aml_prt_integer(FWAcpiAmlBuilder *builder, UINT64 value)
+{
+    UINT8 *bytes;
+
+    if (value > 0xffU) {
+        return fw_acpi_aml_integer(builder, value);
+    }
+    if (!fw_aml_reserve(builder, 2U, &bytes)) {
+        return 0;
+    }
+    bytes[0] = FW_AML_BYTE_PREFIX;
+    bytes[1] = (UINT8)value;
     return 1;
 }
 
@@ -756,6 +801,30 @@ static BOOLEAN fw_aml_range_valid(UINT64 base, UINT64 size)
     return size == 0 || base <= ~(UINT64)0 - (size - 1U);
 }
 
+static BOOLEAN fw_aml_ranges_overlap(UINT64 first_base, UINT64 first_size,
+                                     UINT64 second_base, UINT64 second_size)
+{
+    return first_size != 0 && second_size != 0 &&
+        first_base <= second_base + second_size - 1U &&
+        second_base <= first_base + first_size - 1U;
+}
+
+static BOOLEAN fw_aml_translated_range_valid(UINT64 base, UINT64 size,
+                                              UINT64 translation)
+{
+    if (size == 0) {
+        return 1;
+    }
+    if ((translation >> 63) != 0) {
+        if (base < (UINT64)0 - translation) {
+            return 0;
+        }
+    } else if (base > ~(UINT64)0 - translation) {
+        return 0;
+    }
+    return fw_aml_range_valid(base + translation, size);
+}
+
 static BOOLEAN fw_aml_memory32_range_valid(UINT64 base, UINT64 size)
 {
     if (size == 0) {
@@ -769,6 +838,9 @@ static BOOLEAN fw_aml_memory32_range_valid(UINT64 base, UINT64 size)
 static BOOLEAN fw_aml_zx6000_inputs_valid(
     const IA64PlatformPciRoot *roots, UINTN root_count,
     const IA64PlatformPciRoute *routes, UINTN route_count,
+    const FWAcpiRootMemoryWindow *root_memory_windows,
+    UINTN root_memory_window_count,
+    UINT64 legacy_io_base,
     UINT64 platform_mmio_base, UINT64 platform_mmio_size)
 {
     UINTN vga_root_count = 0;
@@ -779,6 +851,8 @@ static BOOLEAN fw_aml_zx6000_inputs_valid(
         root_count > IA64_PLATFORM_MAX_PCI_ROOTS ||
         route_count > IA64_PLATFORM_MAX_PCI_ROUTES ||
         (route_count != 0 && routes == NULL) ||
+        root_memory_window_count > FW_ACPI_ROOT_MEMORY_WINDOW_MAX ||
+        (root_memory_window_count != 0 && root_memory_windows == NULL) ||
         !fw_aml_memory32_range_valid(platform_mmio_base,
                                      platform_mmio_size)) {
         return 0;
@@ -786,22 +860,60 @@ static BOOLEAN fw_aml_zx6000_inputs_valid(
     for (i = 0; i < root_count; i++) {
         const IA64PlatformPciRoot *root = &roots[i];
 
-        if (root->BusEnd < root->Bus ||
+        if (root->BusEnd < root->Bus || root->Rope > 0x00ffffffU ||
             (root->Flags & ~IA64_PLATFORM_PCI_ROOT_KNOWN_FLAGS) != 0 ||
             ((root->Flags & IA64_PLATFORM_PCI_ROOT_FLAG_SPARSE_IO) != 0 ?
-             root->IoSize == 0 || root->IoTranslationOffset == 0 :
+             root->IoSize == 0 || root->IoTranslationOffset == 0 ||
+             root->IoTranslationOffset != legacy_io_base :
              root->IoTranslationOffset != 0) ||
             !fw_aml_range_valid(root->IoBase, root->IoSize) ||
+            (root->IoSize != 0 &&
+             (root->IoBase > 0xffffU ||
+              root->IoSize > 0x10000U - root->IoBase)) ||
             !fw_aml_range_valid(root->Mmio32Base, root->Mmio32Size) ||
-            !fw_aml_range_valid(root->Mmio64Base, root->Mmio64Size)) {
+            !fw_aml_range_valid(root->Mmio64Base, root->Mmio64Size) ||
+            !fw_aml_translated_range_valid(root->Mmio32Base, root->Mmio32Size,
+                                            root->Mmio32TranslationOffset) ||
+            !fw_aml_translated_range_valid(root->Mmio64Base, root->Mmio64Size,
+                                            root->Mmio64TranslationOffset)) {
             return 0;
         }
         if ((root->Flags & IA64_PLATFORM_PCI_ROOT_FLAG_VGA_LEGACY) != 0) {
             vga_root_count++;
         }
         for (j = 0; j < i; j++) {
-            if (root->Segment == roots[j].Segment &&
-                root->Bus == roots[j].Bus) {
+            if (root->Rope == roots[j].Rope ||
+                (root->Segment == roots[j].Segment &&
+                 root->Bus == roots[j].Bus)) {
+                return 0;
+            }
+        }
+    }
+    for (i = 0; i < root_memory_window_count; i++) {
+        const FWAcpiRootMemoryWindow *window = &root_memory_windows[i];
+
+        if (window->RootIndex >= root_count || window->Size == 0 ||
+            !fw_aml_range_valid(window->Base, window->Size)) {
+            return 0;
+        }
+        for (j = 0; j < root_count; j++) {
+            const IA64PlatformPciRoot *root = &roots[j];
+            UINT64 mmio32_base = root->Mmio32Base +
+                root->Mmio32TranslationOffset;
+            UINT64 mmio64_base = root->Mmio64Base +
+                root->Mmio64TranslationOffset;
+
+            if (fw_aml_ranges_overlap(window->Base, window->Size,
+                                      mmio32_base, root->Mmio32Size) ||
+                fw_aml_ranges_overlap(window->Base, window->Size,
+                                      mmio64_base, root->Mmio64Size)) {
+                return 0;
+            }
+        }
+        for (j = 0; j < i; j++) {
+            if (fw_aml_ranges_overlap(window->Base, window->Size,
+                                      root_memory_windows[j].Base,
+                                      root_memory_windows[j].Size)) {
                 return 0;
             }
         }
@@ -856,19 +968,9 @@ static void fw_aml_root_name(UINTN index, CHAR8 name[5])
     name[4] = '\0';
 }
 
-UINT32 fw_acpi_zx6000_root_uid(UINTN root_index)
+UINT32 fw_acpi_hp_root_uid(const IA64PlatformPciRoot *root)
 {
-    /* The zx6000 ACPI root UIDs omit 0x500. */
-    return (UINT32)((root_index < 5U ? root_index : root_index + 1U) << 8);
-}
-
-UINT32 fw_acpi_hp_root_uid(const IA64PlatformPciRoot *root,
-                           UINTN root_index, UINTN root_count)
-{
-    if (root_count == 5U) {
-        return root->Rope << 8;
-    }
-    return fw_acpi_zx6000_root_uid(root_index);
+    return root->Rope << 8;
 }
 
 static UINTN fw_aml_root_route_count(
@@ -898,18 +1000,29 @@ static const FWLegacyVgaIoRange fw_legacy_vga_io_ranges[] = {
 };
 
 static BOOLEAN fw_aml_root_io_range(FWAcpiAmlBuilder *builder,
-                                    const IA64PlatformPciRoot *root,
                                     UINT64 base, UINT64 size)
 {
     UINT64 maximum = base + size - 1U;
+    UINT8 *bytes;
 
-    return (root->Flags & IA64_PLATFORM_PCI_ROOT_FLAG_SPARSE_IO) != 0 ?
-        fw_acpi_aml_qword_io_to_memory(
-            builder, 1, 0, base, maximum,
-            root->IoTranslationOffset, size) :
-        fw_acpi_aml_qword_io(
-            builder, 0, base, maximum,
-            root->IoTranslationOffset, size);
+    /* IA-64 Linux uses the EFI legacy I/O space when translation is zero. */
+    if ((base | maximum | size) > 0xffffU) {
+        return fw_acpi_aml_qword_io(builder, 0, base, maximum, 0, size);
+    }
+    if (!fw_aml_reserve(builder, 16U, &bytes)) {
+        return 0;
+    }
+    bytes[0] = FW_AML_WORD_ADDRESS_TAG;
+    fw_aml_write_le16(bytes + 1U, 13U);
+    bytes[3] = FW_AML_RESOURCE_IO;
+    bytes[4] = FW_AML_RESOURCE_PRODUCER_FIXED;
+    bytes[5] = FW_AML_IO_ENTIRE_RANGE;
+    fw_aml_write_le16(bytes + 6U, 0);
+    fw_aml_write_le16(bytes + 8U, (UINT16)base);
+    fw_aml_write_le16(bytes + 10U, (UINT16)maximum);
+    fw_aml_write_le16(bytes + 12U, 0);
+    fw_aml_write_le16(bytes + 14U, (UINT16)size);
+    return 1;
 }
 
 static BOOLEAN fw_aml_root_io_resources(FWAcpiAmlBuilder *builder,
@@ -932,7 +1045,7 @@ static BOOLEAN fw_aml_root_io_resources(FWAcpiAmlBuilder *builder,
     }
     if (!has_legacy_vga || native_owner) {
         return root->IoSize == 0 ||
-            fw_aml_root_io_range(builder, root, root->IoBase, root->IoSize);
+            fw_aml_root_io_range(builder, root->IoBase, root->IoSize);
     }
     for (i = 0; i < FW_ARRAY_SIZE(fw_legacy_vga_io_ranges); i++) {
         UINT64 base = fw_legacy_vga_io_ranges[i].Base;
@@ -941,7 +1054,7 @@ static BOOLEAN fw_aml_root_io_resources(FWAcpiAmlBuilder *builder,
         if (cursor < end && cursor < base) {
             UINT64 fragment_end = end < base ? end : base;
 
-            if (!fw_aml_root_io_range(builder, root, cursor,
+            if (!fw_aml_root_io_range(builder, cursor,
                                       fragment_end - cursor)) {
                 return 0;
             }
@@ -952,13 +1065,13 @@ static BOOLEAN fw_aml_root_io_resources(FWAcpiAmlBuilder *builder,
         }
     }
     if (cursor < end &&
-        !fw_aml_root_io_range(builder, root, cursor, end - cursor)) {
+        !fw_aml_root_io_range(builder, cursor, end - cursor)) {
         return 0;
     }
     if (owner) {
         for (i = 0; i < FW_ARRAY_SIZE(fw_legacy_vga_io_ranges); i++) {
             if (!fw_aml_root_io_range(
-                    builder, root, fw_legacy_vga_io_ranges[i].Base,
+                    builder, fw_legacy_vga_io_ranges[i].Base,
                     fw_legacy_vga_io_ranges[i].Size)) {
                 return 0;
             }
@@ -967,22 +1080,130 @@ static BOOLEAN fw_aml_root_io_resources(FWAcpiAmlBuilder *builder,
     return 1;
 }
 
-static BOOLEAN fw_aml_root_resources(FWAcpiAmlBuilder *builder,
-                                     const IA64PlatformPciRoot *root,
-                                     BOOLEAN has_legacy_vga)
+static BOOLEAN fw_aml_memory_window(FWAcpiAmlBuilder *builder,
+                                     UINT64 base, UINT64 size,
+                                     UINT64 translation, BOOLEAN wide)
 {
     UINT64 maximum;
 
-    if (!fw_acpi_aml_name(builder, "_CRS") ||
-        !fw_acpi_aml_resource_template_begin(builder) ||
-        (root->ConfigBase != 0 &&
-         !fw_aml_hp_ccsr(builder, root->ConfigBase,
-                         IA64_PLATFORM_ZX1_LBA_CONFIG_SIZE)) ||
-        !fw_acpi_aml_word_bus_number(
-            builder, 0, root->Bus, root->BusEnd, 0,
-            (UINT16)((UINT16)root->BusEnd - root->Bus + 1U))) {
+    if (size == 0) {
+        return 1;
+    }
+    if (!fw_aml_range_valid(base, size)) {
+        return fw_aml_fail(builder);
+    }
+    maximum = base + size - 1U;
+    if (!wide && (base | maximum | translation | size) <= 0xffffffffU) {
+        return fw_acpi_aml_dword_memory(builder, 0, base, maximum,
+                                         translation, size);
+    }
+    return fw_acpi_aml_qword_memory(builder, 0, base, maximum,
+                                     translation, size);
+}
+
+static BOOLEAN fw_aml_root_memory_windows(
+    FWAcpiAmlBuilder *builder, UINTN root_index,
+    const FWAcpiRootMemoryWindow *windows, UINTN window_count)
+{
+    UINTN i;
+
+    for (i = 0; i < window_count; i++) {
+        if (windows[i].RootIndex == root_index &&
+            !fw_aml_memory_window(builder, windows[i].Base,
+                                  windows[i].Size, 0, 0)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+BOOLEAN fw_acpi_build_uart_ssdt(
+    UINT8 *buffer, UINTN capacity, const IA64PlatformUart *uarts,
+    UINTN uart_count, UINTN root_count, UINTN *length)
+{
+    static const CHAR8 hex[] = "0123456789ABCDEF";
+    FWAcpiAmlBuilder builder;
+    UINTN root;
+    UINTN i;
+
+    if (length != NULL) {
+        *length = 0;
+    }
+    if (buffer == NULL || length == NULL ||
+        uart_count > IA64_PLATFORM_MAX_UARTS ||
+        (uart_count != 0 && uarts == NULL) ||
+        root_count > IA64_PLATFORM_MAX_PCI_ROOTS) {
         return 0;
     }
+    for (i = 0; i < uart_count; i++) {
+        if (uarts[i].RootIndex >= root_count ||
+            !fw_aml_range_valid(uarts[i].Base,
+                                IA64_PLATFORM_UART_REGISTER_COUNT)) {
+            return 0;
+        }
+    }
+    fw_acpi_aml_builder_init(&builder, buffer, capacity);
+    for (root = 0; root < root_count; root++) {
+        CHAR8 path[] = "\\_SB.SBA0.PCI0";
+        BOOLEAN opened = 0;
+
+        path[sizeof(path) - 2U] = hex[root];
+        for (i = 0; i < uart_count; i++) {
+            CHAR8 name[] = "UAR0";
+            UINTN memory_offset;
+            UINT8 *irq;
+
+            if (uarts[i].RootIndex != root) {
+                continue;
+            }
+            if (!opened && !fw_acpi_aml_scope_begin(&builder, path)) {
+                return 0;
+            }
+            opened = 1;
+            name[3] = hex[i];
+            if (!fw_acpi_aml_device_begin(&builder, name) ||
+                !fw_aml_name_eisa_id(&builder, "_HID", "PNP0501") ||
+                !fw_aml_name_integer(&builder, "_UID", i) ||
+                !fw_aml_name_integer(&builder, "_STA", 15) ||
+                !fw_acpi_aml_name(&builder, "_CRS") ||
+                !fw_acpi_aml_resource_template_begin(&builder)) {
+                return 0;
+            }
+            memory_offset = builder.Length;
+            if (!fw_aml_memory_window(&builder, uarts[i].Base,
+                                      IA64_PLATFORM_UART_REGISTER_COUNT,
+                                      0, 0)) {
+                return 0;
+            }
+            /* The UART consumes its parent's fixed memory window. */
+            builder.Buffer[memory_offset + 4U] |= 1U;
+            if (!fw_aml_reserve(&builder, 9U, &irq)) {
+                return 0;
+            }
+            irq[0] = 0x89U; /* Extended Interrupt Descriptor */
+            fw_aml_write_le16(irq + 1U, 6U);
+            irq[3] = 1U; /* Consumer, level, active-high, exclusive. */
+            irq[4] = 1U;
+            fw_aml_write_le32(irq + 5U, uarts[i].Gsi);
+            if (!fw_acpi_aml_resource_template_end(&builder) ||
+                !fw_acpi_aml_package_end(&builder)) {
+                return 0;
+            }
+        }
+        if (opened && !fw_acpi_aml_package_end(&builder)) {
+            return 0;
+        }
+    }
+    return fw_acpi_aml_builder_finish(&builder, length);
+}
+
+static BOOLEAN fw_aml_pci_windows(FWAcpiAmlBuilder *builder,
+                                   const IA64PlatformPciRoot *root,
+                                   UINTN root_index,
+                                   BOOLEAN has_legacy_vga,
+                                   const FWAcpiRootMemoryWindow *windows,
+                                   UINTN window_count)
+{
     if (!fw_aml_root_io_resources(builder, root, has_legacy_vga)) {
         return 0;
     }
@@ -992,23 +1213,32 @@ static BOOLEAN fw_aml_root_resources(FWAcpiAmlBuilder *builder,
                                   0, 0x60000U)) {
         return 0;
     }
-    if (root->Mmio32Size != 0) {
-        maximum = root->Mmio32Base + root->Mmio32Size - 1U;
-        if (!fw_acpi_aml_qword_memory(
-                builder, 0, root->Mmio32Base, maximum,
-                root->Mmio32TranslationOffset, root->Mmio32Size)) {
-            return 0;
-        }
-    }
-    if (root->Mmio64Size != 0) {
-        maximum = root->Mmio64Base + root->Mmio64Size - 1U;
-        if (!fw_acpi_aml_qword_memory(
-                builder, 0, root->Mmio64Base, maximum,
-                root->Mmio64TranslationOffset, root->Mmio64Size)) {
-            return 0;
-        }
-    }
-    return fw_acpi_aml_resource_template_end(builder);
+    return fw_aml_memory_window(builder, root->Mmio32Base, root->Mmio32Size,
+                                 root->Mmio32TranslationOffset, 0) &&
+        fw_aml_memory_window(builder, root->Mmio64Base, root->Mmio64Size,
+                             root->Mmio64TranslationOffset, 1) &&
+        fw_aml_root_memory_windows(builder, root_index,
+                                   windows, window_count);
+}
+
+static BOOLEAN fw_aml_root_resources(FWAcpiAmlBuilder *builder,
+                                     const IA64PlatformPciRoot *root,
+                                     UINTN root_index,
+                                     BOOLEAN has_legacy_vga,
+                                     const FWAcpiRootMemoryWindow *windows,
+                                     UINTN window_count)
+{
+    return fw_acpi_aml_name(builder, "_CRS") &&
+        fw_acpi_aml_resource_template_begin(builder) &&
+        (root->ConfigBase == 0 ||
+         fw_aml_hp_ccsr(builder, root->ConfigBase,
+                        IA64_PLATFORM_ZX1_LBA_CONFIG_SIZE)) &&
+        fw_acpi_aml_word_bus_number(
+            builder, 0, root->Bus, root->BusEnd, 0,
+            (UINT16)((UINT16)root->BusEnd - root->Bus + 1U)) &&
+        fw_aml_pci_windows(builder, root, root_index, has_legacy_vga,
+                           windows, window_count) &&
+        fw_acpi_aml_resource_template_end(builder);
 }
 
 static BOOLEAN fw_aml_root_prt(FWAcpiAmlBuilder *builder,
@@ -1036,10 +1266,10 @@ static BOOLEAN fw_aml_root_prt(FWAcpiAmlBuilder *builder,
         }
         address = ((UINT64)route->Device << 16) | 0xffffU;
         if (!fw_acpi_aml_package_begin(builder, 4) ||
-            !fw_acpi_aml_integer(builder, address) ||
-            !fw_acpi_aml_integer(builder, route->Pin) ||
-            !fw_acpi_aml_integer(builder, 0) ||
-            !fw_acpi_aml_integer(builder, route->Gsi) ||
+            !fw_aml_prt_integer(builder, address) ||
+            !fw_aml_prt_integer(builder, route->Pin) ||
+            !fw_aml_prt_integer(builder, 0) ||
+            !fw_aml_prt_integer(builder, route->Gsi) ||
             !fw_acpi_aml_package_end(builder)) {
             return 0;
         }
@@ -1076,8 +1306,9 @@ static BOOLEAN fw_aml_zx6000_acpi_pm_resource(FWAcpiAmlBuilder *builder,
 
 static BOOLEAN fw_aml_zx6000_root(
     FWAcpiAmlBuilder *builder, const IA64PlatformPciRoot *root,
-    UINTN root_index, UINTN root_count, BOOLEAN has_legacy_vga,
-    const IA64PlatformPciRoute *routes, UINTN route_count)
+    UINTN root_index, BOOLEAN has_legacy_vga,
+    const IA64PlatformPciRoute *routes, UINTN route_count,
+    const FWAcpiRootMemoryWindow *windows, UINTN window_count)
 {
     CHAR8 name[5];
 
@@ -1089,12 +1320,12 @@ static BOOLEAN fw_aml_zx6000_root(
             "HWP0003" : "HWP0002") &&
         fw_aml_name_eisa_id(builder, "_CID", "PNP0A03") &&
         fw_aml_name_integer(builder, "_UID",
-                            fw_acpi_hp_root_uid(root, root_index,
-                                                root_count)) &&
+                            fw_acpi_hp_root_uid(root)) &&
         fw_aml_name_integer(builder, "_SEG", root->Segment) &&
         fw_aml_name_integer(builder, "_BBN", root->Bus) &&
         fw_aml_name_integer(builder, "_CCA", 1) &&
-        fw_aml_root_resources(builder, root, has_legacy_vga) &&
+        fw_aml_root_resources(builder, root, root_index, has_legacy_vga,
+                              windows, window_count) &&
         fw_aml_root_prt(builder, root, routes, route_count) &&
         fw_acpi_aml_package_end(builder);
 }
@@ -1103,6 +1334,9 @@ BOOLEAN fw_acpi_build_zx6000_dsdt(
     UINT8 *buffer, UINTN capacity,
     const IA64PlatformPciRoot *roots, UINTN root_count,
     const IA64PlatformPciRoute *routes, UINTN route_count,
+    const FWAcpiRootMemoryWindow *root_memory_windows,
+    UINTN root_memory_window_count,
+    UINT64 legacy_io_base,
     UINT64 platform_mmio_base, UINT64 platform_mmio_size,
     UINTN *length)
 {
@@ -1114,18 +1348,21 @@ BOOLEAN fw_acpi_build_zx6000_dsdt(
         *length = 0;
     }
 
+    if (buffer == NULL || length == NULL ||
+        !fw_aml_zx6000_inputs_valid(roots, root_count,
+                                    routes, route_count,
+                                    root_memory_windows,
+                                    root_memory_window_count,
+                                    legacy_io_base,
+                                    platform_mmio_base,
+                                    platform_mmio_size)) {
+        return 0;
+    }
     for (i = 0; i < root_count; i++) {
         if ((roots[i].Flags &
              IA64_PLATFORM_PCI_ROOT_FLAG_VGA_LEGACY) != 0) {
             has_legacy_vga = 1;
         }
-    }
-    if (buffer == NULL || length == NULL ||
-        !fw_aml_zx6000_inputs_valid(roots, root_count,
-                                    routes, route_count,
-                                    platform_mmio_base,
-                                    platform_mmio_size)) {
-        return 0;
     }
 
     fw_acpi_aml_builder_init(&builder, buffer, capacity);
@@ -1152,14 +1389,32 @@ BOOLEAN fw_acpi_build_zx6000_dsdt(
                         FW_ACPI_ZX1_SBA_CSR_SIZE) ||
         !fw_acpi_aml_memory32_fixed(&builder, 1,
                                     FW_ACPI_ZX1_SBA_CSR_BASE,
-                                    FW_ACPI_ZX1_SBA_CSR_SIZE) ||
-        !fw_acpi_aml_resource_template_end(&builder)) {
+                                    FW_ACPI_ZX1_SBA_CSR_SIZE)) {
+        return 0;
+    }
+    /* The SBA produces the CPU-side windows consumed by its PCI roots. */
+    for (i = 0; i < root_count; i++) {
+        IA64PlatformPciRoot upstream = roots[i];
+
+        upstream.Mmio32Base += upstream.Mmio32TranslationOffset;
+        upstream.Mmio64Base += upstream.Mmio64TranslationOffset;
+        upstream.Mmio32TranslationOffset = 0;
+        upstream.Mmio64TranslationOffset = 0;
+        if (!fw_aml_pci_windows(&builder, &upstream, i, has_legacy_vga,
+                                root_memory_windows,
+                                root_memory_window_count)) {
+            return 0;
+        }
+    }
+    if (!fw_acpi_aml_resource_template_end(&builder)) {
         return 0;
     }
     for (i = 0; i < root_count; i++) {
-        if (!fw_aml_zx6000_root(&builder, &roots[i], i, root_count,
+        if (!fw_aml_zx6000_root(&builder, &roots[i], i,
                                 has_legacy_vga,
-                                routes, route_count)) {
+                                routes, route_count,
+                                root_memory_windows,
+                                root_memory_window_count)) {
             return 0;
         }
     }

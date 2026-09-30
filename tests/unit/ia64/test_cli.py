@@ -127,6 +127,7 @@ def test_machine_cpu_defaults(qemu: str) -> None:
         "itanium-vpc": "merced-800",
         "itanium2-vpc": "montecito-9050",
         "hp-i2000": "merced-800",
+        "hp-zx2000": "mckinley-900",
         "hp-zx6000": "madison-1500",
         "hp-rx2660": "montecito-9010",
     }

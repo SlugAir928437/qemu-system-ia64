@@ -9,6 +9,8 @@
 
 #include "hw/pci/pci.h"
 
+#define HP_IA64_INT10_IO_BASE 0x000001e0U
+#define HP_IA64_INT10_IO_SIZE 0x00000010U
 #define HP_IA64_INT10_MAX_MODES 96U
 
 typedef struct HPIA64Int10Registers {

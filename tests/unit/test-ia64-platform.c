@@ -234,6 +234,67 @@ static void assert_valid(IA64PlatformDescriptor *descriptor,
     g_assert_null(err);
 }
 
+static void test_fixed_uarts(void)
+{
+    static const uint64_t invalid_bases[] = {
+        0, 0x20000000, 0x70000000, 0x80000000,
+        IA64_PLATFORM_FIRMWARE_BASE, TEST_LEGACY_IO_BASE,
+        TEST_ZX1_CONFIG_BASE, 0xfee00000, 0xfff00000, 0xffef0000,
+        IA64_RAS_HUB_DEFAULT_BASE, IA64_PLATFORM_ZX1_SBA_CSR_BASE,
+        1ULL << IA64_PLATFORM_ZX6000_PHYS_ADDR_BITS, UINT64_MAX - 0x1fff,
+    };
+    IA64PlatformTestDescriptor storage;
+    IA64PlatformDescriptor *descriptor = test_descriptor_init(
+        &storage, IA64_PLATFORM_ID_HP_ZX2000);
+    IA64PlatformIoSapic *sapic = (void *)(storage.bytes +
+        le32_to_cpu(descriptor->IoSapicOffset));
+    IA64PlatformUart *second = &descriptor->Uart[1];
+    size_t i;
+
+    descriptor->ConsoleBase = cpu_to_le64(0x70000000);
+    descriptor->UartCount = cpu_to_le32(2);
+    descriptor->Uart[0].Base = descriptor->ConsoleBase;
+    descriptor->Uart[0].Gsi = descriptor->ConsoleIrq;
+    second->Base = cpu_to_le64(0x70006000);
+    second->Gsi = cpu_to_le32(18);
+    sapic->Id = 7; /* Neither UART ownership nor root identity uses this ID. */
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_valid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+
+    for (i = 0; i < G_N_ELEMENTS(invalid_bases); i++) {
+        second->Base = cpu_to_le64(invalid_bases[i]);
+        ia64_platform_desc_finalize(descriptor, sizeof(storage));
+        assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    }
+    second->Base = cpu_to_le64(0x70006000);
+    second->RootIndex = cpu_to_le32(1);
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    second->RootIndex = 0;
+    second->Gsi = cpu_to_le32(256);
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    second->Gsi = descriptor->ConsoleIrq;
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    second->Gsi = cpu_to_le32(18);
+    descriptor->ConsoleBase = cpu_to_le64(0x70002000);
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    descriptor->Uart[0].Base = descriptor->ConsoleBase;
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_valid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    descriptor->ConsoleBase = cpu_to_le64(TEST_LEGACY_IO_BASE);
+    descriptor->Uart[0].Base = descriptor->ConsoleBase;
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+    descriptor->ConsoleBase = cpu_to_le64(0x70002000);
+    descriptor->Uart[0].Base = descriptor->ConsoleBase;
+    descriptor->UartCount = cpu_to_le32(IA64_PLATFORM_MAX_UARTS + 1);
+    ia64_platform_desc_finalize(descriptor, sizeof(storage));
+    assert_invalid(descriptor, IA64_PLATFORM_ID_HP_ZX2000);
+}
+
 static void test_valid(void)
 {
     IA64PlatformTestDescriptor storage;
@@ -1755,7 +1816,7 @@ static void test_i2000_profile_valid(void)
     g_assert_false(le32_to_cpu(profile->Flags) &
                    IA64_I2000_PROFILE_FLAG_EFI_TIME_UNAVAILABLE);
     g_assert_cmpuint(profile->IdeUnitMask, ==,
-                     IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK);
+                     IA64_I2000_PROFILE_IDE_UNIT_MASK);
     g_assert_cmphex(le64_to_cpu(descriptor->NvramBase), ==,
                     IA64_I2000_PROFILE_NVRAM_BASE);
     g_assert_cmphex(le64_to_cpu(descriptor->NvramSize), ==,
@@ -1765,7 +1826,8 @@ static void test_i2000_profile_valid(void)
     g_assert_cmphex(ia64_platform_firmware_compat_flags(
                         IA64_PLATFORM_ID_HP_I2000,
                         le32_to_cpu(descriptor->Flags)), ==,
-                    IA64_FW_COMPAT_ALL_MASK);
+                    IA64_FW_COMPAT_ALL_MASK &
+                    ~IA64_FW_COMPAT_SPARSE_SAL_MDT);
     g_assert_cmphex(ia64_platform_firmware_compat_flags(
                         IA64_PLATFORM_ID_HP_ZX6000,
                         (le32_to_cpu(descriptor->Flags) &
@@ -2032,6 +2094,7 @@ int main(int argc, char **argv)
                     test_pci_console_resource);
     g_test_add_func("/ia64/platform/numa-policy", test_numa_policy);
     g_test_add_func("/ia64/platform/console-clock", test_console_clock);
+    g_test_add_func("/ia64/platform/fixed-uarts", test_fixed_uarts);
     g_test_add_func("/ia64/platform/array-alignment",
                     test_array_alignment);
     g_test_add_func("/ia64/platform/empty-array-zero-encoding",

@@ -44,6 +44,7 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 
 _supported_fmt qcow2 qed
 _supported_proto file fuse
+_require_one_device_of virtio-scsi-pci virtio-scsi-ccw
 
 BACKING_IMG="$TEST_IMG.base"
 

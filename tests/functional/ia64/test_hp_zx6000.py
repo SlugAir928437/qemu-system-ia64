@@ -10,6 +10,7 @@ from pathlib import Path
 
 from qemu_test import QemuSystemTest, wait_for_console_pattern
 
+from ia64.acpi import assert_pci_windows, io_window, memory_window
 from ia64.efi_build import app_path
 from ia64.media import make_el_torito_iso, make_fat_disk
 from ia64.protocol import wait_for_suite
@@ -18,6 +19,7 @@ from ia64.protocol import wait_for_suite
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
     "root-device-path", "console-output", "console-variables",
+    "low-memory-allocation",
 }
 
 MPT_SMOKE_CASES = SMOKE_CASES | {"controller-device-path"}
@@ -40,7 +42,6 @@ ACPI_RECLAIM_TABLE_BASE = 0x00802000
 ACPI_HEADER_SIZE = 36
 ZX6000_ACPI_PM_BASE = 0xFF5C0000
 ZX6000_ACPI_SCI_GSI = 23
-ZX6000_LEGACY_IO_BASE = 0x00000FFFFC000000
 
 
 class HPZx6000Boot(QemuSystemTest):
@@ -94,6 +95,7 @@ class HPZx6000Boot(QemuSystemTest):
         rsdp = self.read_physical(vm, ACPI_RECLAIM_TABLE_BASE, 36)
         xsdt = self.read_sdt(vm, struct.unpack_from("<Q", rsdp, 24)[0])
         fadt = None
+        hcdp = None
 
         for offset in range(ACPI_HEADER_SIZE, len(xsdt), 8):
             table = self.read_sdt(
@@ -101,8 +103,15 @@ class HPZx6000Boot(QemuSystemTest):
             )
             if table[:4] == b"FACP":
                 fadt = table
-                break
+            elif table[:4] == b"HCDP":
+                hcdp = table
         self.assertIsNotNone(fadt)
+        self.assertIsNotNone(hcdp)
+        self.assertEqual(sum(hcdp) & 0xff, 0)
+        self.assertEqual(struct.unpack_from("<Q", hcdp, 60)[0], 0xFEC00000)
+        self.assertEqual(struct.unpack_from("<I", hcdp, 72)[0], 24)
+        # The PDH UART uses a level-triggered, active-high interrupt.
+        self.assertEqual(hcdp[81] & 0x43, 0x40)
         self.assertEqual(sum(fadt) & 0xff, 0)
         self.assertEqual(struct.unpack_from("<H", fadt, 46)[0],
                          ZX6000_ACPI_SCI_GSI)
@@ -138,52 +147,23 @@ class HPZx6000Boot(QemuSystemTest):
         motherboard_resources += b"\x79\x00"
         self.assertEqual(dsdt.count(motherboard_resources), 1)
 
-        def qword_io(type_flags, minimum, maximum, translation, length):
-            return (
-                b"\x8a\x2b\x00\x01\x0c" + bytes([type_flags]) +
-                struct.pack("<QQQQQ", 0, minimum, maximum,
-                            translation, length)
-            )
-
-        def dword_memory(minimum, maximum, translation, length):
-            return (
-                b"\x87\x17\x00\x00\x0c\x01" +
-                struct.pack("<IIIII", 0, minimum, maximum,
-                            translation, length)
-            )
-
-        root0_io = (
-            (0x0000, 0x01CD, 0x01CE),
-            (0x01D2, 0x03AF, 0x01DE),
-            (0x03E0, 0x1FFF, 0x1C20),
-        )
-        for minimum, maximum, length in root0_io:
-            sparse = qword_io(
-                0x33, minimum, maximum,
-                ZX6000_LEGACY_IO_BASE, length,
-            )
-            self.assertEqual(dsdt.count(sparse), 1)
-
-        for minimum in range(0x2000, 0xC000, 0x2000):
-            sparse = qword_io(
-                0x33, minimum, minimum + 0x1FFF,
-                ZX6000_LEGACY_IO_BASE, 0x2000,
-            )
-            self.assertEqual(dsdt.count(sparse), 1)
-
-        for minimum, maximum, length in (
-            (0x01CE, 0x01D1, 0x04),
-            (0x03B0, 0x03DF, 0x30),
-        ):
-            legacy_vga_io = qword_io(
-                0x33, minimum, maximum,
-                ZX6000_LEGACY_IO_BASE, length,
-            )
-            self.assertEqual(dsdt.count(legacy_vga_io), 1)
-        legacy_vga_memory = dword_memory(
-            0x000A0000, 0x000FFFFF, 0, 0x00060000,
-        )
-        self.assertEqual(dsdt.count(legacy_vga_memory), 1)
+        windows = []
+        for index, base in enumerate((0x80000000, 0x88000000, 0x90000000,
+                                      0x98000000, 0xA0000000, 0xB0000000)):
+            ports = ([(0, 0x1CE), (0x1D2, 0x1DE), (0x3E0, 0x1C20)]
+                     if index == 0 else [(index * 0x2000, 0x2000)])
+            if index == 4:
+                ports += [(0x1CE, 4), (0x3B0, 0x30)]
+            root = [io_window(start, size) for start, size in ports]
+            if index == 4:
+                root.append(memory_window(0xA0000, 0x60000))
+            root.append(memory_window(base, 0x10000000 if index == 4
+                                      else 0x8000000))
+            if index == 0:
+                root += [memory_window(base, 8)
+                         for base in (0xFEC00000, 0xFEC02000)]
+            windows.append(root)
+        assert_pci_windows(self, dsdt[ACPI_HEADER_SIZE:], windows)
 
     @staticmethod
     def send_keys(vm, qcodes):

@@ -1199,7 +1199,8 @@ static uint64_t ati_reg_read(void *opaque, hwaddr addr, unsigned int size)
     }
 
     if (ati_2d_reg_read(s, addr, &engine_val, size) ||
-        ati_3d_read(s, addr, &engine_val, size)) {
+        ati_3d_read(s, addr, &engine_val, size) ||
+        ati_cce_read(s, addr, &engine_val, size)) {
         trace_ati_mm_read(size, addr, ati_reg_name(addr & ~3ULL), engine_val);
         return engine_val;
     }
@@ -1590,7 +1591,8 @@ void ati_mmio_write(ATIVGAState *s, hwaddr addr, uint64_t data,
         return;
     }
     if (ati_2d_reg_write(s, addr, data, size) ||
-        ati_3d_write(s, addr, data, size)) {
+        ati_3d_write(s, addr, data, size) ||
+        ati_cce_write(s, addr, data, size)) {
         return;
     }
     switch (addr) {
@@ -2498,47 +2500,27 @@ static int ati_vga_post_load(void *opaque, int version_id)
 {
     ATIVGAState *s = opaque;
 
-    if (version_id < 9) {
-        s->regs.surface_cntl = 0;
-        memset(s->regs.surface_lower, 0, sizeof(s->regs.surface_lower));
-        memset(s->regs.surface_upper, 0, sizeof(s->regs.surface_upper));
-        memset(s->regs.surface_info, 0, sizeof(s->regs.surface_info));
+    if (ati_cce_post_load(s) < 0) {
+        return -EINVAL;
     }
-    if (version_id < 8) {
-        s->crtc_tile_line_active =
-            s->regs.crtc_offset_cntl & CRTC_TILE_LINE_MASK;
-        memset(s->regs.pll_active, 0, sizeof(s->regs.pll_active));
-        s->regs.pll_pending = false;
-        memset(s->regs.bres, 0, sizeof(s->regs.bres));
-        memset(s->regs.trail, 0, sizeof(s->regs.trail));
-        memset(s->regs.scale, 0, sizeof(s->regs.scale));
-        s->regs.scale_3d_cntl = s->regs.scale_3d_datatype = 0;
-    }
-    /* Version 8 streams may contain an unused fifth tile-line bit. */
-    if (s->crtc_tile_line_active > 31 ||
+    if (s->crtc_tile_line_active & ~CRTC_TILE_LINE_MASK ||
         s->host_data.next >= ATI_HOST_DATA_BANK_DWORDS ||
-        (version_id >= 3 &&
-         s->regs.brush_y_x & ~ati_brush_y_x_mask(s)) ||
-        (version_id >= 3 && s->host_data.pending_count > 3) ||
-        (version_id >= 3 &&
-         s->regs.rbbm_guicntl & ~HOST_DATA_SWAP_MASK) ||
-        (version_id >= 3 &&
-         s->regs.clr_cmp_cntl &
-         ~(CLR_CMP_FN_SRC_MASK | CLR_CMP_FN_DST_MASK |
-           CLR_CMP_ENABLE_MASK)) ||
-        (version_id >= 4 && (s->regs.cur_offset & BIT(31)) &&
+        s->regs.brush_y_x & ~ati_brush_y_x_mask(s) ||
+        s->host_data.pending_count > 3 ||
+        s->regs.rbbm_guicntl & ~HOST_DATA_SWAP_MASK ||
+        s->regs.clr_cmp_cntl &
+        ~(CLR_CMP_FN_SRC_MASK | CLR_CMP_FN_DST_MASK | CLR_CMP_ENABLE_MASK) ||
+        ((s->regs.cur_offset & BIT(31)) &&
          (s->cursor_active.offset & ~0x07fffff0U ||
           s->cursor_active.hv_pos & ~0x3fff0fffU ||
           s->cursor_active.hv_offs & ~0x003f003fU)) ||
-        (version_id >= 4 &&
-         (s->crtc_frame & ~ATI_CRTC_FRAME_MASK ||
-          s->crtc_frame_elapsed_ns < 0 ||
-          s->crtc_frame_elapsed_ns >= ati_crtc_frame_ns(s) ||
-          s->crtc_vline & ~ati_crtc_line_mask(s) ||
-          (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF &&
-           s->crtc_fix_vsync_timing))) ||
-        (version_id >= 5 &&
-         (s->regs.clock_cntl_index & ~PLL_INDEX_CNTL_MASK)) ||
+        s->crtc_frame & ~ATI_CRTC_FRAME_MASK ||
+        s->crtc_frame_elapsed_ns < 0 ||
+        s->crtc_frame_elapsed_ns >= ati_crtc_frame_ns(s) ||
+        s->crtc_vline & ~ati_crtc_line_mask(s) ||
+        (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF &&
+         s->crtc_fix_vsync_timing) ||
+        s->regs.clock_cntl_index & ~PLL_INDEX_CNTL_MASK ||
         s->bbi2c.state < STOPPED || s->bbi2c.state > SENT_NACK ||
         s->bbi2c.last_data < 0 || s->bbi2c.last_data > 1 ||
         s->bbi2c.last_clock < 0 || s->bbi2c.last_clock > 1 ||
@@ -2547,59 +2529,17 @@ static int ati_vga_post_load(void *opaque, int version_id)
         s->bbi2c.current_addr > UINT8_MAX) {
         return -EINVAL;
     }
-    if (version_id < 7) {
-        memset(s->r100_3d.scaler_palette, 0,
-               sizeof(s->r100_3d.scaler_palette));
-        s->r100_3d.scaler_palette_format = 0;
-        s->r100_3d.scaler_palette_valid = false;
-    }
-    if (version_id >= 2 && ati_3d_post_load(s) < 0) {
+    if (ati_3d_post_load(s) < 0) {
         return -EINVAL;
     }
-    if (version_id < 3) {
-        memset(s->host_data.pending, 0, sizeof(s->host_data.pending));
-        s->host_data.pending_count = 0;
-        s->regs.rbbm_guicntl = 0;
-        s->regs.clr_cmp_cntl = 0;
-        s->regs.clr_cmp_clr_src = 0;
-        s->regs.clr_cmp_clr_dst = 0;
-        s->regs.clr_cmp_mask = 0;
-        s->regs.brush_y_x = 0;
-        memset(s->regs.brush_data, 0, sizeof(s->regs.brush_data));
-        memset(s->r100_3d.fog_table, 0,
-               sizeof(s->r100_3d.fog_table));
-        s->r100_3d.fog_table_index = 0;
-        s->regs.dp_write_mask = UINT32_MAX;
-        s->crtc_offset_active = s->regs.crtc_offset & CRTC_OFFSET_MASK;
-        s->crtc_pitch_active = s->regs.crtc_pitch;
-    }
-    if (version_id < 4 || !(s->regs.cur_offset & BIT(31))) {
+    if (!(s->regs.cur_offset & BIT(31))) {
         ati_cursor_commit(s);
-    }
-    if (version_id < 5) {
-        s->regs.clock_cntl_index = 0;
-        memset(s->regs.pll, 0, sizeof(s->regs.pll));
-    }
-    if (version_id < 6) {
-        s->regs.dac_ext_cntl = 0;
-        s->regs.dac_macro_cntl = 0;
     }
     if (s->regs.pll_pending) {
         ati_pll_commit(s);
         s->crtc_frame_elapsed_ns %= ati_crtc_frame_ns(s);
     }
-    if (version_id < 4) {
-        s->crtc_frame_start_ns = 0;
-        s->crtc_frame_elapsed_ns = 0;
-        s->crtc_frame = 0;
-        s->crtc_event_line = 0;
-        s->crtc_vline = 0;
-        s->crtc_vblank_save = false;
-        s->crtc_fix_vsync_timing =
-            s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF;
-        timer_del(&s->vblank_timer);
-        ati_crtc_start(s);
-    } else if (!ati_crtc_enabled(s)) {
+    if (!ati_crtc_enabled(s)) {
         s->crtc_frame_start_ns = 0;
         timer_del(&s->vblank_timer);
     } else {
@@ -2637,7 +2577,7 @@ static int ati_vga_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ati_vga = {
     .name = "ati-vga",
-    .version_id = 9,
+    .version_id = 10,
     .minimum_version_id = 1,
     .pre_save = ati_vga_pre_save,
     .post_load = ati_vga_post_load,
@@ -2647,54 +2587,55 @@ static const VMStateDescription vmstate_ati_vga = {
                        vmstate_vga_common, VGACommonState),
         VMSTATE_STRUCT(regs, ATIVGAState, 0,
                        vmstate_ati_vga_regs, ATIVGARegs),
-        VMSTATE_STRUCT(cursor_active, ATIVGAState, 4,
+        VMSTATE_STRUCT(cursor_active, ATIVGAState, 0,
                        vmstate_ati_cursor, ATICursorState),
         VMSTATE_STRUCT(host_data, ATIVGAState, 0,
                        vmstate_ati_host_data, ATIHostDataState),
-        VMSTATE_UINT8_ARRAY_V(host_data.pending, ATIVGAState, 3, 3),
-        VMSTATE_UINT8_V(host_data.pending_count, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.rbbm_guicntl, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.clr_cmp_cntl, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.clr_cmp_clr_src, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.clr_cmp_clr_dst, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.clr_cmp_mask, ATIVGAState, 3),
-        VMSTATE_UINT32_V(regs.brush_y_x, ATIVGAState, 3),
-        VMSTATE_UINT32_ARRAY_V(regs.brush_data, ATIVGAState, 64, 3),
-        VMSTATE_STRUCT(r100_3d, ATIVGAState, 2,
+        VMSTATE_UINT8_ARRAY(host_data.pending, ATIVGAState, 3),
+        VMSTATE_UINT8(host_data.pending_count, ATIVGAState),
+        VMSTATE_UINT32(regs.rbbm_guicntl, ATIVGAState),
+        VMSTATE_UINT32(regs.clr_cmp_cntl, ATIVGAState),
+        VMSTATE_UINT32(regs.clr_cmp_clr_src, ATIVGAState),
+        VMSTATE_UINT32(regs.clr_cmp_clr_dst, ATIVGAState),
+        VMSTATE_UINT32(regs.clr_cmp_mask, ATIVGAState),
+        VMSTATE_UINT32(regs.brush_y_x, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(regs.brush_data, ATIVGAState, 64),
+        VMSTATE_STRUCT(r100_3d, ATIVGAState, 0,
                        vmstate_ati_3d, ATI3DState),
-        VMSTATE_UINT8_ARRAY_V(r100_3d.fog_table, ATIVGAState,
-                              ATI_3D_FOG_TABLE_ENTRIES, 3),
-        VMSTATE_UINT8_V(r100_3d.fog_table_index, ATIVGAState, 3),
-        VMSTATE_UINT32_V(crtc_offset_active, ATIVGAState, 3),
-        VMSTATE_UINT32_V(crtc_pitch_active, ATIVGAState, 3),
-        VMSTATE_INT64_V(crtc_frame_elapsed_ns, ATIVGAState, 4),
-        VMSTATE_UINT32_V(crtc_frame, ATIVGAState, 4),
-        VMSTATE_UINT16_V(crtc_vline, ATIVGAState, 4),
-        VMSTATE_BOOL_V(crtc_vblank_save, ATIVGAState, 4),
-        VMSTATE_BOOL_V(crtc_fix_vsync_timing, ATIVGAState, 4),
-        VMSTATE_UINT32_V(regs.clock_cntl_index, ATIVGAState, 5),
-        VMSTATE_UINT32_ARRAY_V(regs.pll, ATIVGAState,
-                               ATI_PLL_REG_COUNT, 5),
-        VMSTATE_UINT32_V(regs.dac_ext_cntl, ATIVGAState, 6),
-        VMSTATE_UINT32_V(regs.dac_macro_cntl, ATIVGAState, 6),
-        VMSTATE_UINT32_ARRAY_V(r100_3d.scaler_palette, ATIVGAState, 256, 7),
-        VMSTATE_UINT8_V(r100_3d.scaler_palette_format, ATIVGAState, 7),
-        VMSTATE_BOOL_V(r100_3d.scaler_palette_valid, ATIVGAState, 7),
-        VMSTATE_UINT32_ARRAY_V(regs.pll_active, ATIVGAState, 5, 8),
-        VMSTATE_BOOL_V(regs.pll_pending, ATIVGAState, 8),
-        VMSTATE_UINT32_ARRAY_V(regs.bres, ATIVGAState, 3, 8),
-        VMSTATE_UINT32_ARRAY_V(regs.trail, ATIVGAState, 4, 8),
-        VMSTATE_UINT32_ARRAY_V(regs.scale, ATIVGAState, 9, 8),
-        VMSTATE_UINT32_V(regs.scale_3d_cntl, ATIVGAState, 8),
-        VMSTATE_UINT32_V(regs.scale_3d_datatype, ATIVGAState, 8),
-        VMSTATE_UINT8_V(crtc_tile_line_active, ATIVGAState, 8),
-        VMSTATE_UINT32_V(regs.surface_cntl, ATIVGAState, 9),
-        VMSTATE_UINT32_ARRAY_V(regs.surface_lower, ATIVGAState,
-                               ATI_SURFACE_COUNT, 9),
-        VMSTATE_UINT32_ARRAY_V(regs.surface_upper, ATIVGAState,
-                               ATI_SURFACE_COUNT, 9),
-        VMSTATE_UINT32_ARRAY_V(regs.surface_info, ATIVGAState,
-                               ATI_SURFACE_COUNT, 9),
+        VMSTATE_UINT8_ARRAY(r100_3d.fog_table, ATIVGAState,
+                            ATI_3D_FOG_TABLE_ENTRIES),
+        VMSTATE_UINT8(r100_3d.fog_table_index, ATIVGAState),
+        VMSTATE_UINT32(crtc_offset_active, ATIVGAState),
+        VMSTATE_UINT32(crtc_pitch_active, ATIVGAState),
+        VMSTATE_INT64(crtc_frame_elapsed_ns, ATIVGAState),
+        VMSTATE_UINT32(crtc_frame, ATIVGAState),
+        VMSTATE_UINT16(crtc_vline, ATIVGAState),
+        VMSTATE_BOOL(crtc_vblank_save, ATIVGAState),
+        VMSTATE_BOOL(crtc_fix_vsync_timing, ATIVGAState),
+        VMSTATE_UINT32(regs.clock_cntl_index, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(regs.pll, ATIVGAState, ATI_PLL_REG_COUNT),
+        VMSTATE_UINT32(regs.dac_ext_cntl, ATIVGAState),
+        VMSTATE_UINT32(regs.dac_macro_cntl, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(r100_3d.scaler_palette, ATIVGAState, 256),
+        VMSTATE_UINT8(r100_3d.scaler_palette_format, ATIVGAState),
+        VMSTATE_BOOL(r100_3d.scaler_palette_valid, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(regs.pll_active, ATIVGAState, 5),
+        VMSTATE_BOOL(regs.pll_pending, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(regs.bres, ATIVGAState, 3),
+        VMSTATE_UINT32_ARRAY(regs.trail, ATIVGAState, 4),
+        VMSTATE_UINT32_ARRAY(regs.scale, ATIVGAState, 9),
+        VMSTATE_UINT32(regs.scale_3d_cntl, ATIVGAState),
+        VMSTATE_UINT32(regs.scale_3d_datatype, ATIVGAState),
+        VMSTATE_UINT8(crtc_tile_line_active, ATIVGAState),
+        VMSTATE_UINT32(regs.surface_cntl, ATIVGAState),
+        VMSTATE_UINT32_ARRAY(regs.surface_lower, ATIVGAState,
+                             ATI_SURFACE_COUNT),
+        VMSTATE_UINT32_ARRAY(regs.surface_upper, ATIVGAState,
+                             ATI_SURFACE_COUNT),
+        VMSTATE_UINT32_ARRAY(regs.surface_info, ATIVGAState,
+                             ATI_SURFACE_COUNT),
+        VMSTATE_STRUCT(cce, ATIVGAState, 0, vmstate_ati_cce, ATICCEState),
+        VMSTATE_TIMER(cce_timer, ATIVGAState),
         VMSTATE_STRUCT(bbi2c, ATIVGAState, 0,
                        vmstate_ati_bitbang_i2c, bitbang_i2c_interface),
         VMSTATE_TIMER(vblank_timer, ATIVGAState),
@@ -2840,6 +2781,7 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     /* Primary CRTC, software and GUI-idle interrupt sources are modeled. */
     dev->config[PCI_INTERRUPT_PIN] = 1;
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, ati_crtc_event, s);
+    ati_cce_init(s);
 }
 
 static void ati_vga_reset(DeviceState *dev)
@@ -2909,6 +2851,7 @@ static void ati_vga_reset(DeviceState *dev)
         s->blt_row_buffer_size = 0;
     }
     ati_3d_reset(s);
+    ati_cce_reset(s);
     graphic_hw_invalidate(s->vga.con);
 }
 
@@ -2917,6 +2860,7 @@ static void ati_vga_exit(PCIDevice *dev)
     ATIVGAState *s = ATI_VGA(dev);
 
     timer_del(&s->vblank_timer);
+    timer_del(&s->cce_timer);
     graphic_console_close(s->vga.con);
     cursor_unref(s->cursor);
     s->cursor = NULL;

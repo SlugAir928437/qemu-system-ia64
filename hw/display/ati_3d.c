@@ -2714,14 +2714,16 @@ bool ati_3d_consume_command_work(ATIVGAState *s, uint64_t work)
 {
     ATI3DState *r = &s->r100_3d;
 
-    return !r->processing_depth || r100_consume_command_work(r, work);
+    return ati_cce_consume_work(s, work, false) &&
+           (!r->processing_depth || r100_consume_command_work(r, work));
 }
 
 bool ati_3d_consume_2d_work(ATIVGAState *s, uint64_t work)
 {
     ATI3DState *r = &s->r100_3d;
 
-    return !r->processing_depth || r100_consume_blit_work(r, work);
+    return ati_cce_consume_work(s, work, true) &&
+           (!r->processing_depth || r100_consume_blit_work(r, work));
 }
 
 static void r100_triangle_gradients(const R100Vertex *v0,

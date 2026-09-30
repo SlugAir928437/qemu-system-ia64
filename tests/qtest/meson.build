@@ -146,12 +146,16 @@ qtests_alpha = ['boot-serial-test'] + \
 qtests_avr = [ 'boot-serial-test' ]
 
 qtests_ia64 = ['ia64-vpc-test'] + \
+  (config_all_devices.has_key('CONFIG_IA64_VPC_STORAGE') ? \
+   ['ia64-storage-dma-test'] : []) + \
   (config_all_devices.has_key('CONFIG_BCM5704_PCI') ? \
    ['bcm5704-test'] : []) + \
   (config_all_devices.has_key('CONFIG_HP_I2000') ? \
    ['hp-i2000-test'] : []) + \
   (config_all_devices.has_key('CONFIG_HP_RX2660') ? \
    ['hp-rx2660-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_HP_ZX2000') ? \
+   ['hp-zx2000-test'] : []) + \
   (config_all_devices.has_key('CONFIG_HP_ZX6000') ? \
    ['hp-zx6000-test'] : []) + \
   (config_all_devices.has_key('CONFIG_IDE_CMD649') ? \

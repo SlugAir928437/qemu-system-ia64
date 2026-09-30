@@ -25,6 +25,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "hw/scsi/scsi.h"
 #include "system/block-backend.h"
 #include "scsi/constants.h"
@@ -33,6 +34,9 @@
 
 #define ATAPI_SECTOR_BITS (2 + BDRV_SECTOR_BITS)
 #define ATAPI_SECTOR_SIZE (1 << ATAPI_SECTOR_BITS)
+
+/* Modeled processing delay, not an ATA/ATAPI timing requirement. */
+#define ATAPI_DMA_COMPLETE_DELAY_NS (NANOSECONDS_PER_SECOND / 1000)
 
 static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret);
 
@@ -174,13 +178,39 @@ static int cd_read_sector(IDEState *s)
     return 0;
 }
 
+void ide_atapi_cmd_complete_timer(void *opaque)
+{
+    IDEState *s = opaque;
+
+    s->status &= ~BUSY_STAT;
+    ide_transfer_stop(s);
+    ide_bus_set_irq(s->bus);
+}
+
+static void ide_atapi_cmd_complete(IDEState *s)
+{
+    if (s->atapi_dma) {
+        /*
+         * Expose the BSY phase of PACKET DMA (ATA/ATAPI-6, 9.8, DPD2).
+         * Complete errors and non-data commands even if the host never
+         * starts bus-master DMA.
+         */
+        s->status |= BUSY_STAT;
+        timer_mod(s->atapi_complete_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  ATAPI_DMA_COMPLETE_DELAY_NS);
+    } else {
+        ide_transfer_stop(s);
+        ide_bus_set_irq(s->bus);
+    }
+}
+
 void ide_atapi_cmd_ok(IDEState *s)
 {
     s->error = 0;
     s->status = READY_STAT | SEEK_STAT;
     s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
-    ide_transfer_stop(s);
-    ide_bus_set_irq(s->bus);
+    ide_atapi_cmd_complete(s);
 }
 
 void ide_atapi_cmd_error(IDEState *s, int sense_key, int asc)
@@ -191,8 +221,7 @@ void ide_atapi_cmd_error(IDEState *s, int sense_key, int asc)
     s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
     s->sense_key = sense_key;
     s->asc = asc;
-    ide_transfer_stop(s);
-    ide_bus_set_irq(s->bus);
+    ide_atapi_cmd_complete(s);
 }
 
 void ide_atapi_io_error(IDEState *s, int ret)
@@ -341,7 +370,7 @@ static void ide_atapi_cmd_check_status(IDEState *s)
     s->error = MC_ERR | (UNIT_ATTENTION << 4);
     s->status = ERR_STAT;
     s->nsector = 0;
-    ide_bus_set_irq(s->bus);
+    ide_atapi_cmd_complete(s);
 }
 /* ATAPI DMA support */
 

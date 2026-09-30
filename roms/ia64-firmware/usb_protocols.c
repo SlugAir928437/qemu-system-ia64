@@ -346,13 +346,9 @@ static BOOLEAN mUsbHcBusy;
 static FW_OHCI_ED mUsbHcTransferEd __attribute__((aligned(16)));
 static FW_OHCI_TD mUsbHcTransferTd[FW_USB_DATA_TD_MAX + 3U]
     __attribute__((aligned(16)));
-static FW_OHCI_ITD mUsbHcIsoTd[FW_USB_ISO_ITD_MAX + 1U]
-    __attribute__((aligned(32)));
+static FW_OHCI_ITD *mUsbHcIsoTd;
 static UINT8 mUsbHcSetupPacket[8] __attribute__((aligned(16)));
-static UINT8 mUsbHcTransferBuffer[FW_USB_MAX_TRANSFER + 1U]
-    __attribute__((aligned(4096)));
-static UINT8 mUsbDescriptorBuffer[FW_USB_MAX_TRANSFER + 1U]
-    __attribute__((aligned(16)));
+static UINT8 *mUsbHcTransferBuffer;
 
 static BOOLEAN usb_hc_valid(EFI_USB_HC_PROTOCOL *This)
 {
@@ -1755,6 +1751,7 @@ static BOOLEAN usb_io_fetch_descriptor(UINT16 Value, UINT16 Index,
 static BOOLEAN usb_io_cache_descriptors(VOID)
 {
     UINT8 language_descriptor[2U + FW_USB_LANGUAGE_MAX * 2U];
+    UINT8 *const descriptor_buffer = mUsbHcTransferBuffer;
     EFI_USB_IO_PROTOCOL protocol = mUsbIoDevice.protocol;
     UINTN length;
     UINTN offset;
@@ -1773,11 +1770,11 @@ static BOOLEAN usb_io_cache_descriptors(VOID)
     }
     length = sizeof(EFI_USB_CONFIG_DESCRIPTOR);
     if (!usb_io_fetch_descriptor((UINT16)(USB_DESC_CONFIGURATION << 8),
-                                 0, mUsbDescriptorBuffer, &length) ||
+                                 0, descriptor_buffer, &length) ||
         length < sizeof(EFI_USB_CONFIG_DESCRIPTOR)) {
         return 0;
     }
-    fw_copy_mem(&mUsbIoDevice.configuration, mUsbDescriptorBuffer,
+    fw_copy_mem(&mUsbIoDevice.configuration, descriptor_buffer,
                 sizeof(mUsbIoDevice.configuration));
     if (mUsbIoDevice.configuration.DescriptorType !=
             USB_DESC_CONFIGURATION ||
@@ -1787,15 +1784,15 @@ static BOOLEAN usb_io_cache_descriptors(VOID)
     }
     length = mUsbIoDevice.configuration.TotalLength;
     if (!usb_io_fetch_descriptor((UINT16)(USB_DESC_CONFIGURATION << 8),
-                                 0, mUsbDescriptorBuffer, &length) ||
+                                 0, descriptor_buffer, &length) ||
         length < mUsbIoDevice.configuration.TotalLength) {
         return 0;
     }
 
     offset = 0;
     while (offset + 2U <= length) {
-        UINT8 descriptor_length = mUsbDescriptorBuffer[offset];
-        UINT8 descriptor_type = mUsbDescriptorBuffer[offset + 1U];
+        UINT8 descriptor_length = descriptor_buffer[offset];
+        UINT8 descriptor_type = descriptor_buffer[offset + 1U];
 
         if (descriptor_length < 2U || descriptor_length > length - offset) {
             return 0;
@@ -1804,7 +1801,7 @@ static BOOLEAN usb_io_cache_descriptors(VOID)
             descriptor_length >= sizeof(EFI_USB_INTERFACE_DESCRIPTOR)) {
             EFI_USB_INTERFACE_DESCRIPTOR *interface =
                 (EFI_USB_INTERFACE_DESCRIPTOR *)(VOID *)(
-                    mUsbDescriptorBuffer + offset);
+                    descriptor_buffer + offset);
 
             if (!selected_interface && interface->InterfaceClass == 3U &&
                 interface->InterfaceSubClass == 1U &&
@@ -1821,7 +1818,7 @@ static BOOLEAN usb_io_cache_descriptors(VOID)
                    mUsbIoDevice.endpoint_count < FW_USB_ENDPOINT_MAX) {
             mUsbIoDevice.endpoint[mUsbIoDevice.endpoint_count++] =
                 *(EFI_USB_ENDPOINT_DESCRIPTOR *)(VOID *)(
-                    mUsbDescriptorBuffer + offset);
+                    descriptor_buffer + offset);
         }
         offset += descriptor_length;
     }
@@ -1932,6 +1929,18 @@ static BOOLEAN usb_keyboard_device_path_init(UINT8 port, UINT8 interface)
 
 BOOLEAN fw_usb_protocols_install(VOID)
 {
+    if (mUsbHcIsoTd == NULL) {
+        mUsbHcIsoTd = fw_boot_dma_buffer(
+            (FW_USB_ISO_ITD_MAX + 1U) * sizeof(*mUsbHcIsoTd), 32);
+    }
+    if (mUsbHcTransferBuffer == NULL) {
+        mUsbHcTransferBuffer = fw_boot_dma_buffer(FW_USB_MAX_TRANSFER + 1U,
+                                                 4096);
+    }
+    if (!mUsbHcIsoTd || !mUsbHcTransferBuffer) {
+        return 0;
+    }
+
     EFI_HANDLE controller = fw_usb_controller_handle();
     EFI_STATUS status;
 

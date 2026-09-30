@@ -11,13 +11,15 @@
 #include "hw/ia64/ia64_platform_abi.h"
 
 #define FW_ACPI_AML_MAX_PACKAGE_DEPTH 32U
+#define FW_ACPI_ROOT_MEMORY_WINDOW_MAX 16U
+#define FW_ACPI_UART_SSDT_AML_CAPACITY (IA64_PLATFORM_MAX_UARTS * 128U)
 
-/* Holds the maximum descriptor set: 16 roots and 128 interrupt routes. */
-#define FW_ACPI_ZX6000_DSDT_AML_CAPACITY 8192U
+/* Holds 16 roots, 128 interrupt routes, and 16 supplemental memory windows. */
+#define FW_ACPI_ZX6000_DSDT_AML_CAPACITY 12288U
 
 /* ZX1 SBA CSR window advertised by the generated namespace. */
-#define FW_ACPI_ZX1_SBA_CSR_BASE 0xfed00000U
-#define FW_ACPI_ZX1_SBA_CSR_SIZE 0x00010000U
+#define FW_ACPI_ZX1_SBA_CSR_BASE IA64_PLATFORM_ZX1_SBA_CSR_BASE
+#define FW_ACPI_ZX1_SBA_CSR_SIZE IA64_PLATFORM_ZX1_SBA_CSR_SIZE
 
 typedef struct FWAcpiAmlFrame {
     UINTN LengthOffset;
@@ -33,6 +35,12 @@ typedef struct FWAcpiAmlBuilder {
     BOOLEAN Failed;
     FWAcpiAmlFrame Frame[FW_ACPI_AML_MAX_PACKAGE_DEPTH];
 } FWAcpiAmlBuilder;
+
+typedef struct FWAcpiRootMemoryWindow {
+    UINTN RootIndex;
+    UINT64 Base;
+    UINT64 Size;
+} FWAcpiRootMemoryWindow;
 
 void fw_acpi_aml_builder_init(FWAcpiAmlBuilder *Builder, UINT8 *Buffer,
                               UINTN Capacity);
@@ -86,16 +94,20 @@ BOOLEAN fw_acpi_aml_qword_io_to_memory(FWAcpiAmlBuilder *Builder,
 BOOLEAN fw_acpi_ssdt_reparent_legacy_devices(UINT8 *Aml, UINTN Length,
                                              const CHAR8 Parent[4]);
 
-/* zx6000 ACPI root UIDs; 0x500 is absent. */
-UINT32 fw_acpi_zx6000_root_uid(UINTN RootIndex);
-UINT32 fw_acpi_hp_root_uid(const IA64PlatformPciRoot *Root,
-                           UINTN RootIndex, UINTN RootCount);
+UINT32 fw_acpi_hp_root_uid(const IA64PlatformPciRoot *Root);
 
-/* Build the AML body shared by the zx6000 and rx2660 DSDTs. */
+BOOLEAN fw_acpi_build_uart_ssdt(
+    UINT8 *Buffer, UINTN Capacity, const IA64PlatformUart *Uarts,
+    UINTN UartCount, UINTN RootCount, UINTN *Length);
+
+/* Build the AML body shared by the HP zx1 and zx2 DSDTs. */
 BOOLEAN fw_acpi_build_zx6000_dsdt(
     UINT8 *Buffer, UINTN Capacity,
     const IA64PlatformPciRoot *Roots, UINTN RootCount,
     const IA64PlatformPciRoute *Routes, UINTN RouteCount,
+    const FWAcpiRootMemoryWindow *RootMemoryWindows,
+    UINTN RootMemoryWindowCount,
+    UINT64 LegacyIoBase,
     UINT64 AcpiPmBase, UINT64 AcpiPmSize,
     UINTN *Length);
 

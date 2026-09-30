@@ -60,6 +60,8 @@
 #define CLOCK_CNTL_INDEX                        0x0008
 #define CLOCK_CNTL_DATA                         0x000c
 #define BIOS_0_SCRATCH                          0x0010
+#define BIOS_4_SCRATCH                          0x0020
+#define BIOS_4_SCRATCH_CRT1                     0x00000002
 #define BUS_CNTL                                0x0030
 #define BUS_CNTL1                               0x0034
 #define GEN_INT_CNTL                            0x0040
@@ -772,6 +774,9 @@
 
 #define BUS_MASTER_DIS                          0x00000040
 #define PM4_BUFFER_CNTL_NONPM4                  0x00000000
+#define PM4_BUFFER_DL_DONE                      BIT(31)
+#define PM4_STAT_BUSY                           BIT(16)
+#define PM4_MICRO_FREERUN                       BIT(30)
 
 /* DP_DATATYPE bit constants */
 #define DST_8BPP                                0x00000002

@@ -15,7 +15,8 @@
 #include "hw/ia64/ia64_ras_abi.h"
 
 #define IA64_PLATFORM_DESC_MAGIC          0x44504c5034364951ULL /* QI64PLPD */
-#define IA64_PLATFORM_DESC_REVISION       7U
+#define IA64_PLATFORM_DESC_REVISION       9U
+#define IA64_PLATFORM_DESC_FIXED_REVISION 8U
 #define IA64_PLATFORM_DESC_ALIGNMENT      0x1000U
 #define IA64_PLATFORM_DESC_MAX_SIZE       0x1000U
 #define IA64_PLATFORM_FIRMWARE_BASE       0x0000000000100000ULL
@@ -54,6 +55,8 @@
     (IA64_PLATFORM_UART_OVERSAMPLING * IA64_PLATFORM_UART_MIN_BAUD)
 /* ZX1-LBA configuration backend aperture. */
 #define IA64_PLATFORM_ZX1_LBA_CONFIG_SIZE 0x2000U
+#define IA64_PLATFORM_ZX1_SBA_CSR_BASE 0xfed00000U
+#define IA64_PLATFORM_ZX1_SBA_CSR_SIZE 0x00010000U
 /* Mercury I/O SAPIC selector offset inside an IOA aperture. */
 #define IA64_PLATFORM_ZX1_IO_SAPIC_OFFSET 0x0800U
 
@@ -73,10 +76,14 @@ static inline int ia64_platform_zx1_embedded_io_sapic(
 #define IA64_PLATFORM_MAX_PROFILES        1U
 #define IA64_PLATFORM_MAX_ONBOARD_DEVICES 16U
 #define IA64_PLATFORM_MAX_NUMA_NODES      8U
+#define IA64_PLATFORM_MAX_UARTS           16U
+#define IA64_PLATFORM_UART_REGISTER_COUNT 8U
+#define IA64_PLATFORM_UART_CLOCK_HZ       1843200U
 
 #define IA64_PLATFORM_ID_HP_I2000         0x00002000U
 #define IA64_PLATFORM_ID_HP_RX2660        0x00002660U
 #define IA64_PLATFORM_ID_HP_ZX6000        0x00006000U
+#define IA64_PLATFORM_ID_HP_ZX2000        0x00012000U
 
 #define IA64_PLATFORM_FLAG_NO_MCFG        (1U << 0)
 #define IA64_PLATFORM_FLAG_QEMU_EXTENSION (1U << 1)
@@ -127,7 +134,7 @@ static inline unsigned long long ia64_platform_firmware_compat_flags(
     if ((flags & IA64_PLATFORM_FLAG_FAMILY_MASK) ==
             IA64_PLATFORM_FLAG_FAMILY_HP_I2000 &&
         (flags & IA64_PLATFORM_FLAG_FIRMWARE_COMPAT) != 0) {
-        return IA64_FW_COMPAT_ALL_MASK;
+        return IA64_FW_COMPAT_ALL_MASK & ~IA64_FW_COMPAT_SPARSE_SAL_MDT;
     }
     return 0;
 }
@@ -213,6 +220,17 @@ typedef struct __attribute__((packed)) IA64PlatformNumaNode {
     unsigned char Distance[IA64_PLATFORM_MAX_NUMA_NODES];
     unsigned char Reserved[8];
 } IA64PlatformNumaNode;
+
+/*
+ * Fixed, byte-addressed 16550 MMIO ports with a 1.8432 MHz input clock.
+ * Each base owns one RESOURCE_ALIGNMENT-sized EFI reservation.
+ */
+typedef struct __attribute__((packed)) IA64PlatformUart {
+    unsigned long long Base;
+    unsigned int Gsi;
+    /* Index into the descriptor's PciRoot array, independent of SAPIC IDs. */
+    unsigned int RootIndex;
+} IA64PlatformUart;
 
 /*
  * PAL_PLATFORM_ADDR type 1 registers exactly one 64 MiB sparse-I/O block.
@@ -331,6 +349,11 @@ typedef struct __attribute__((packed)) IA64PlatformDescriptor {
     /* Firmware-visible machine-check and corrected-error record transport. */
     unsigned long long RasBase;
     unsigned long long RasSize;
+
+    /* Optional fixed UARTs; entry zero also supplies the console fields. */
+    unsigned int UartCount;
+    unsigned int Reserved5;
+    IA64PlatformUart Uart[IA64_PLATFORM_MAX_UARTS];
 } IA64PlatformDescriptor;
 
 /*

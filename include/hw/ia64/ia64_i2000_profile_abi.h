@@ -99,6 +99,7 @@
 #define IA64_I2000_PROFILE_IDE_BMDMA_SIZE                    16U
 #define IA64_I2000_PROFILE_IDE_IRQ                           14U
 #define IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK      (1U << 0)
+#define IA64_I2000_PROFILE_IDE_UNIT_MASK                     0x03U
 
 /* Multi-byte fields use little-endian wire order; byte fields are direct. */
 typedef struct __attribute__((packed)) IA64PlatformI2000Profile {

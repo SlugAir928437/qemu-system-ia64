@@ -8,7 +8,6 @@
 
 #define FW_SHELL_LINE_MAX       256U
 #define FW_SHELL_ARG_MAX        16U
-#define FW_SHELL_FS_MAX         16U
 #define FW_SHELL_PATH_MAX       256U
 #define FW_SHELL_DEVICE_PATH_MAX 1024U
 #define FW_SHELL_BOOT_ORDER_MAX 16U
@@ -20,7 +19,7 @@ typedef struct {
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *simple_fs;
 } FW_SHELL_FILE_SYSTEM;
 
-static FW_SHELL_FILE_SYSTEM mShellFileSystems[FW_SHELL_FS_MAX];
+static FW_SHELL_FILE_SYSTEM *mShellFileSystems;
 static UINTN mShellFileSystemCount;
 static UINTN mShellCurrentFileSystem;
 static CHAR8 mShellCurrentDirectory[FW_SHELL_PATH_MAX] = { '\\', 0 };
@@ -284,8 +283,19 @@ static UINTN fw_shell_refresh_file_systems(void)
     if (status != EFI_SUCCESS) {
         return 0;
     }
-    for (index = 0; index < handle_count &&
-                    mShellFileSystemCount < FW_SHELL_FS_MAX; index++) {
+    if (mShellFileSystems != NULL) {
+        (void)bs_free_pool(mShellFileSystems);
+        mShellFileSystems = NULL;
+    }
+    status = bs_allocate_pool(EfiBootServicesData,
+                               handle_count * sizeof(*mShellFileSystems),
+                               (VOID **)&mShellFileSystems);
+    if (status != EFI_SUCCESS) {
+        (void)bs_free_pool(handles);
+        fw_shell_puts("Cannot allocate the file system map.\r\n");
+        return 0;
+    }
+    for (index = 0; index < handle_count; index++) {
         EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *simple_fs = NULL;
 
         if (bs_handle_protocol(handles[index],
@@ -319,13 +329,10 @@ static BOOLEAN fw_shell_parse_fs_prefix(const CHAR8 *Text, UINTN *Index,
     }
     while (Text[position] >= '0' && Text[position] <= '9') {
         have_digit = 1;
-        if (value > (FW_SHELL_FS_MAX - 1U) / 10U) {
+        if (value > (~(UINTN)0 - (UINTN)(Text[position] - '0')) / 10U) {
             return 0;
         }
         value = value * 10U + (UINTN)(Text[position] - '0');
-        if (value >= FW_SHELL_FS_MAX) {
-            return 0;
-        }
         position++;
     }
     if (!have_digit || Text[position] != ':') {
@@ -1211,6 +1218,48 @@ static void fw_shell_system_info(void)
     fw_shell_show_date_time();
 }
 
+static EFI_STATUS fw_shell_edd30(UINTN Count, CHAR8 **Arguments)
+{
+    CHAR16 name[] = { 'E', 'D', 'D', '3', '0', 0 };
+    BOOLEAN value;
+    UINTN size = sizeof(value);
+    EFI_STATUS status;
+
+    if (!fw_i2000_profile_enabled()) {
+        fw_shell_puts("EDD30 is available only for SCSI devices "
+                      "on HP i2000.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    if (Count == 1) {
+        status = rs_get_variable(name, (VOID *)mBlockIoProtocolGuid,
+                                  NULL, &size, &value);
+        if (status != EFI_SUCCESS) {
+            return status;
+        }
+        if (size != sizeof(value) || value > 1) {
+            return EFI_INVALID_PARAMETER;
+        }
+        fw_shell_puts(value ? "EDD30: on\r\n" : "EDD30: off\r\n");
+        return EFI_SUCCESS;
+    }
+    if (Count != 2 ||
+        (!fw_shell_ascii_equal_ci(Arguments[1], "on") &&
+         !fw_shell_ascii_equal_ci(Arguments[1], "off"))) {
+        fw_shell_puts("Usage: edd30 [on|off]\r\n");
+        return EFI_INVALID_PARAMETER;
+    }
+    value = fw_shell_ascii_equal_ci(Arguments[1], "on");
+    status = rs_set_variable(name, (VOID *)mBlockIoProtocolGuid,
+                              EFI_VARIABLE_NON_VOLATILE |
+                              EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                              EFI_VARIABLE_RUNTIME_ACCESS,
+                              sizeof(value), &value);
+    if (status == EFI_SUCCESS) {
+        fw_shell_puts("EDD30 saved; reset to apply.\r\n");
+    }
+    return status;
+}
+
 static void fw_shell_help(void)
 {
     fw_shell_puts(
@@ -1226,6 +1275,7 @@ static void fw_shell_help(void)
         "  boot [Boot####|fsN:|path]    Show or launch boot target\r\n"
         "  bootorder [Boot#### ...]     Show or save boot order\r\n"
         "  bootnext [Boot####]          Show or select next-boot option\r\n"
+        "  edd30 [on|off]               Show or set i2000 SCSI path mode\r\n"
         "  date [YYYY-MM-DD]            Show or set date\r\n"
         "  time [HH:MM[:SS]]            Show or set time\r\n"
         "  clear                        Clear the screen\r\n"
@@ -1343,14 +1393,18 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
                 CHAR8 specification[FW_SHELL_PATH_MAX];
                 UINTN length = 0;
                 UINTN i;
+                CHAR8 digits[20];
+                UINTN digit_count = 0;
 
                 specification[length++] = 'f';
                 specification[length++] = 's';
-                if (fs_index >= 10U) {
-                    specification[length++] =
-                        (CHAR8)('0' + fs_index / 10U);
+                do {
+                    digits[digit_count++] = (CHAR8)('0' + fs_index % 10U);
+                    fs_index /= 10U;
+                } while (fs_index != 0);
+                while (digit_count != 0) {
+                    specification[length++] = digits[--digit_count];
                 }
-                specification[length++] = (CHAR8)('0' + fs_index % 10U);
                 specification[length++] = ':';
                 for (i = 0; default_path[i] != 0; i++) {
                     specification[length++] = default_path[i];
@@ -1388,6 +1442,8 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "clear") ||
                fw_shell_ascii_equal_ci(Arguments[0], "cls")) {
         (void)fw_console_clear();
+    } else if (fw_shell_ascii_equal_ci(Arguments[0], "edd30")) {
+        status = fw_shell_edd30(ArgumentCount, Arguments);
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "reset")) {
         fw_reset_cold();
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "exit")) {

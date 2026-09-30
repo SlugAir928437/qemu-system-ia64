@@ -102,7 +102,7 @@ void ia64_platform_i2000_profile_init(
     profile->IdeFunction = IA64_I2000_PROFILE_IDE_FUNCTION;
     profile->IdeProgIf = IA64_I2000_PROFILE_IDE_PROG_IF;
     profile->IdeIrq = IA64_I2000_PROFILE_IDE_IRQ;
-    profile->IdeUnitMask = IA64_I2000_PROFILE_IDE_PRIMARY_MASTER_UNIT_MASK;
+    profile->IdeUnitMask = IA64_I2000_PROFILE_IDE_UNIT_MASK;
     profile->IdeCommandSize = IA64_I2000_PROFILE_IDE_COMMAND_SIZE;
     profile->IdeControlSize = IA64_I2000_PROFILE_IDE_CONTROL_SIZE;
     profile->Isp12160Capabilities = cpu_to_le32(
@@ -1253,6 +1253,83 @@ static bool ia64_platform_desc_profile_entry_valid(
     return true;
 }
 
+static bool ia64_platform_uarts_valid(const IA64PlatformDescriptor *descriptor,
+                                     Error **errp)
+{
+    uint32_t count = le32_to_cpu(descriptor->UartCount);
+    uint32_t i, j;
+
+    if (count > IA64_PLATFORM_MAX_UARTS || descriptor->Reserved5 != 0 ||
+        (count &&
+         (le32_to_cpu(descriptor->PciRootIdentity) !=
+              IA64_PLATFORM_PCI_ROOT_IDENTITY_HP_ZX ||
+          descriptor->Uart[0].Base != descriptor->ConsoleBase ||
+          descriptor->Uart[0].Gsi != descriptor->ConsoleIrq ||
+          le32_to_cpu(descriptor->ConsoleRegisterStride) != 1 ||
+          le32_to_cpu(descriptor->ConsoleClockHz) !=
+              IA64_PLATFORM_UART_CLOCK_HZ))) {
+        error_setg(errp, "invalid IA-64 fixed UART console description");
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        const IA64PlatformUart *uart = &descriptor->Uart[i];
+        uint64_t base = le64_to_cpu(uart->Base);
+        uint64_t size = IA64_PLATFORM_RESOURCE_ALIGNMENT;
+
+        if (!base || (base & (size - 1)) ||
+            !ia64_platform_u64_range_valid(base, size) ||
+            base + size > (1ULL <<
+                le32_to_cpu(descriptor->PhysicalAddressBits)) ||
+            le32_to_cpu(uart->RootIndex) >=
+                le32_to_cpu(descriptor->PciRootCount) ||
+            !ia64_platform_gsi_present(descriptor, le32_to_cpu(uart->Gsi)) ||
+            ia64_platform_range_overlaps_ram(descriptor, base, size) ||
+            ia64_platform_range_overlaps_io_sapic(descriptor, base, size) ||
+            ia64_platform_u64_ranges_overlap(
+                base, size, le64_to_cpu(descriptor->LegacyIoBase),
+                le64_to_cpu(descriptor->LegacyIoSize)) ||
+            ia64_platform_u64_ranges_overlap(
+                base, size, IA64_PLATFORM_ZX1_SBA_CSR_BASE,
+                IA64_PLATFORM_ZX1_SBA_CSR_SIZE) ||
+            (i && ia64_platform_range_overlaps_fixed(
+                descriptor, base, size, NULL))) {
+            error_setg(errp, "invalid IA-64 fixed UART %u resources", i);
+            return false;
+        }
+        for (j = 0; j < le32_to_cpu(descriptor->PciRootCount); j++) {
+            const IA64PlatformPciRoot *root =
+                ia64_platform_pci_root(descriptor, j);
+            uint64_t config_size = ia64_platform_pci_config_size(
+                root->ConfigType, root->Bus, root->BusEnd);
+            uint64_t config_base = le64_to_cpu(root->ConfigBase) +
+                ia64_platform_pci_config_offset(root->ConfigType, root->Bus);
+
+            if (ia64_platform_u64_ranges_overlap(
+                    base, size, config_base, config_size) ||
+                ia64_platform_u64_ranges_overlap(
+                    base, size, le64_to_cpu(root->Mmio32Base) +
+                    le64_to_cpu(root->Mmio32TranslationOffset),
+                    le64_to_cpu(root->Mmio32Size)) ||
+                ia64_platform_u64_ranges_overlap(
+                    base, size, le64_to_cpu(root->Mmio64Base) +
+                    le64_to_cpu(root->Mmio64TranslationOffset),
+                    le64_to_cpu(root->Mmio64Size))) {
+                error_setg(errp,
+                           "IA-64 fixed UART %u overlaps PCI resources", i);
+                return false;
+            }
+        }
+        for (j = 0; j < i; j++) {
+            if (uart->Base == descriptor->Uart[j].Base ||
+                uart->Gsi == descriptor->Uart[j].Gsi) {
+                error_setg(errp, "IA-64 fixed UART %u duplicates resources", i);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool ia64_platform_desc_validate(const IA64PlatformDescriptor *descriptor,
                                  size_t available_size,
                                  uint32_t expected_platform_id,
@@ -1317,7 +1394,13 @@ bool ia64_platform_desc_validate(const IA64PlatformDescriptor *descriptor,
         return false;
     }
     if (le32_to_cpu(descriptor->FormatRevision) !=
-        IA64_PLATFORM_DESC_REVISION) {
+        IA64_PLATFORM_DESC_REVISION &&
+        !(le32_to_cpu(descriptor->FormatRevision) ==
+          IA64_PLATFORM_DESC_FIXED_REVISION &&
+          le64_to_cpu(descriptor->FirmwareBase) ==
+          IA64_PLATFORM_FIRMWARE_BASE &&
+          le64_to_cpu(descriptor->FirmwareSize) ==
+          IA64_PLATFORM_FIRMWARE_SIZE)) {
         error_setg(errp, "unsupported IA-64 platform descriptor revision %u",
                    le32_to_cpu(descriptor->FormatRevision));
         return false;
@@ -1419,8 +1502,11 @@ bool ia64_platform_desc_validate(const IA64PlatformDescriptor *descriptor,
 
     firmware_base = le64_to_cpu(descriptor->FirmwareBase);
     firmware_size = le64_to_cpu(descriptor->FirmwareSize);
-    if (firmware_base != IA64_PLATFORM_FIRMWARE_BASE ||
-        firmware_size != IA64_PLATFORM_FIRMWARE_SIZE) {
+    if (firmware_base < IA64_PLATFORM_FIRMWARE_BASE ||
+        (firmware_base & 0x1fff) || !firmware_size ||
+        firmware_size > IA64_PLATFORM_FIRMWARE_SIZE ||
+        firmware_base > low_ram_end ||
+        firmware_size > low_ram_end - firmware_base) {
         error_setg(errp, "invalid IA-64 platform firmware range");
         return false;
     }
@@ -1626,6 +1712,9 @@ bool ia64_platform_desc_validate(const IA64PlatformDescriptor *descriptor,
     if (acpi_pm_size != 0 &&
         !ia64_platform_gsi_present(descriptor, acpi_sci_gsi)) {
         error_setg(errp, "IA-64 ACPI SCI has no I/O SAPIC owner");
+        return false;
+    }
+    if (!ia64_platform_uarts_valid(descriptor, errp)) {
         return false;
     }
     if (ia64_platform_checksum(descriptor, total_size) != 0) {

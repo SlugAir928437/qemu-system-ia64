@@ -16,8 +16,8 @@ The following sources were used as technical references:
   `include/video/radeon.h <https://github.com/torvalds/linux/blob/master/include/video/radeon.h>`__,
   `drivers/gpu/drm/radeon/radeon_reg.h <https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/radeon/radeon_reg.h>`__
   for register and command-packet definitions,
-  `radeon_combios.c <https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/radeon/radeon_combios.c>`__
-  for legacy BIOS clock-table layout,
+  `radeon_combios.c (Linux v6.12) <https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/radeon/radeon_combios.c>`__
+  for legacy BIOS clock-table layout and memory-table decoding,
   `radeon_legacy_encoders.c <https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/radeon/radeon_legacy_encoders.c>`__
   for primary-DAC load detection, and
   `radeon_legacy_crtc.c <https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/radeon/radeon_legacy_crtc.c>`__
@@ -32,6 +32,11 @@ The following sources were used as technical references:
   for ATI Radeon R100 command sequences.
 * `Mesa <https://gitlab.freedesktop.org/mesa/mesa>`__ for ATI Radeon R100
   rendering and texture behavior.
+* XFree86's legacy ``RADEONGetBIOSParameters()`` in the
+  `NetBSD 1.6 xsrc mirror
+  <https://github.com/NetBSD/xsrc/blob/netbsd-1-6/xfree/xc/programs/Xserver/hw/xfree86/drivers/ati/radeon_driver.c>`__
+  for the BIOS scratch register 4 monitor-presence flags supplied by the
+  HP INT 10h bridge.  The file carries an MIT-style permission notice.
 
 ATI 2D and display references
 -----------------------------
@@ -111,6 +116,23 @@ behavior.
        destination memory unchanged.  Tiled scanout returns zero pixel data
        (palette entry zero in indexed modes), including when panning.
        Linear surfaces remain available.
+   * - ``hw/display/ati_cce.c``
+     - Linux's Rage128 CCE definitions, ring and indirect-buffer submission,
+       FIFO partition selection and PCI GART table layout [r128-cce-linux]_.
+       X.Org's packet encodings, register-write submissions and PCI/AGP GART
+       selection [r128-xorg]_.
+     - Command rings in VRAM or PCI GART memory, and indirect
+       buffers in PCI GART memory.  Supported packets are types 0, 1 and 2,
+       and type-3 NOP.  The PCI GART uses 4 KiB pages and little-endian
+       32-bit entries within a 32 MiB aperture.  Emulator limits are 4 MiB
+       per ring or indirect buffer and four indirect-buffer levels.
+       Ring read pointers advance after complete packets; unsupported type-3
+       commands leave the ring pending.  Processing yields at work limits,
+       preserving packet and indirect-buffer positions across resumption and
+       migration.  A register write exceeding its work limit halts the CCE
+       until reset or ring reconfiguration.
+       PIO submission, AGP translation, read-pointer memory writeback,
+       microcode execution and the other type-3 commands are not modeled.
    * - Radeon paths in ``ati_2d_tile_offset()`` and ``ati_scanout_read()``
      - Mesa's ``radeon_span.c`` [r100-mesa]_ and Linux's
        ``radeon_crtc_do_set_base()`` [r100-linux]_.
@@ -137,9 +159,15 @@ distributed license text.  Notices for adapted code are included in
 
 .. [r128-xorg] `X.Org xf86-video-r128 6.10.2
    <https://xorg.freedesktop.org/archive/individual/driver/xf86-video-r128-6.10.2.tar.bz2>`__,
-   ``src/r128_accel.c``, ``src/r128_driver.c`` and ``src/r128_reg.h``.
+   ``src/r128_accel.c``, ``src/r128_driver.c``, ``src/r128_dri.c`` and
+   ``src/r128_reg.h``.
    Each file carries an MIT/X11-style permission notice allowing use,
    modification and redistribution with the copyright and permission notices.
+
+.. [r128-cce-linux] `Linux v2.6.18 Rage128 DRM driver
+   <https://github.com/torvalds/linux/tree/v2.6.18/drivers/char/drm>`__,
+   ``r128_drv.h``, ``r128_cce.c``, ``r128_state.c`` and ``ati_pcigart.c``,
+   distributed under MIT-style permission notices.
 
 .. [r128-directfb] DirectFB, commit
    ``5b474ffbe2e91b8363b3dd7d2c04cac191dbaa37``,

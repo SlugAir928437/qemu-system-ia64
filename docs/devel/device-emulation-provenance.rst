@@ -6,6 +6,24 @@ Device emulation source notice
 The following public sources are technical references for
 the device models that link to this notice:
 
+* HP's `zx2000 Technical Reference Guide, 5969-3154
+  <https://www.manualslib.com/manual/359342/Hp-Zx2000.html>`__,
+  pages 1-1, 2-11, 3-12 and B-4–B-7, for the 900 MHz CPU, RAM limits,
+  PCI device paths, CMD649, Intel 82540 and PDH components; `CPU QuickSpecs 11822
+  <https://www.hpe.com/psnow/doc/c04283081>`__ for the 1.4 GHz/1.5 MB CPU.
+* The published `zx2000 PCI configuration and Linux boot log
+  <https://www.okqubit.net/machines/hinv/hp_zx2000.txt>`__ for PCI bus numbers,
+  device identities, BAR assignments, onboard interrupt GSIs and UART addresses.
+* HP's `zx1 MIO External Reference Specification, revision 1.0
+  <https://parisc.docs.kernel.org/en/latest/_downloads/b1581469ed89d27cd7792b0bc9ae9c15/Zx1-mio.pdf>`__,
+  sections 2.4, 2.5 and 3.3, for I/O port routing, address-range
+  registers and rope configuration in the shared zx1 model.
+* The `ACPI Specification
+  <https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/06_Device_Configuration/Device_Configuration.html>`__,
+  sections 6.2.2, 6.4.3.5 and 6.4.3.6, for bridge windows and UART resources;
+  Linux's `IA-64 PCI implementation
+  <https://github.com/torvalds/linux/blob/v2.6.12/arch/ia64/pci/pci.c>`__,
+  ``add_io_space()``, for zero translation selecting legacy I/O space.
 * Intel's `EFI Specification 1.10
   <https://www.intel.com/content/dam/doc/product-specification/efi-v1-10-specification.pdf>`__,
   section 5.2 (``AllocatePool()``), for eight-byte pool alignment.
@@ -81,7 +99,8 @@ the device models that link to this notice:
   defines the IOCB transfer negotiation and timeout flags.
 * Intel's `8254x Family of Gigabit Ethernet Controllers Software Developer's
   Manual <https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf>`__,
-  sections 3.2.7 and 3.4.3, for receive and transmit interrupt timers.
+  sections 3.2.7 and 3.4.3, for receive and transmit interrupt timers,
+  and sections 5.6.8–5.6.9 for EEPROM subsystem identifiers.
 * XFree86's
   `460gxPCI.c <https://github.com/NetBSD/xsrc/blob/netbsd-5/xfree/xc/programs/Xserver/hw/xfree86/os-support/bus/460gxPCI.c>`__
   and

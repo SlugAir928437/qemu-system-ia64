@@ -1362,7 +1362,7 @@ F: tests/qtest/hppa-astro-test.c
 
 IA-64 Machines
 --------------
-HP i2000, HP zx6000, HP rx2660 and IA-64 virtual PC
+HP i2000, HP zx2000, HP zx6000, HP rx2660 and IA-64 virtual PC
 S: Orphan
 F: configs/devices/ia64-softmmu/
 F: docs/system/target-ia64.rst
@@ -1383,6 +1383,7 @@ F: tests/qtest/*ia64*.c
 F: tests/qtest/bcm5704-test.c
 F: tests/qtest/hp-i2000-test.c
 F: tests/qtest/hp-rx2660-test.c
+F: tests/qtest/hp-zx2000-test.c
 F: tests/qtest/hp-zx6000-test.c
 F: tests/qtest/libqos/ia64-vpc-machine.c
 F: tests/unit/test-hp-*.c

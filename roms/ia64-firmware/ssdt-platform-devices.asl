@@ -588,24 +588,6 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 
     Scope (\_SB.PCI0)
     {
-        // Firmware enables this only for the VPC platform.  The hardware
-        // profiles describe their serial ports in their platform DSDTs.
-        Name (U0EN, 0x0F)
-        Device (UAR0)
-        {
-            Name (_HID, EisaId ("PNP0501"))
-            Name (_UID, Zero)
-            Method (_STA, 0, NotSerialized)
-            {
-                Return (U0EN)
-            }
-            Name (_CRS, ResourceTemplate ()
-            {
-                IO (Decode16, 0x03F8, 0x03F8, 1, 8)
-                IRQNoFlags () {4}
-            })
-        }
-
         // Firmware patches this AML BytePrefix payload.
         Name (P2EN, 0x0F)
 

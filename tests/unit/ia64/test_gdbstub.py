@@ -18,10 +18,12 @@ GDB_PORT = 1234
 GDB_NUM_RAW_REGS = 462
 GDB_RAW_REGISTER_BYTES = 128 * 8 + 128 * 16 + (GDB_NUM_RAW_REGS - 256) * 8
 
-# Establish a five-register clean RSE partition: set BSPSTORE, allocate and
-# populate a frame, cover it, then flushrs.  The bytes are the same instruction
-# sequence used by rse_cover_flushrs_spills_covered_frame in cases_rse.py.
-RSE_CLEAN_PROGRAM = bytes.fromhex(
+# Establish a five-register frame: set BSPSTORE, allocate and populate the
+# frame, cover it, then flushrs.  Itanium 2-class CPUs have no clean partition,
+# so the flush leaves all 96 physical stacked registers invalid while retaining
+# the rotated frame base.  The bytes are the same instruction sequence used by
+# rse_cover_flushrs_spills_covered_frame in cases_rse.py.
+RSE_FLUSH_PROGRAM = bytes.fromhex(
     "04000000010000000000006000000260"
     "01000c242a0400000002000000000400"
     "00081406800500000002000000000400"
@@ -222,11 +224,11 @@ def test_gdbstub(qemu: str, qemu_img: str | None) -> None:
                 raise RuntimeError("aggregate predicate register was not 1")
 
             # A same-value mov-to-BSPSTORE is not architecturally inert: it
-            # invalidates the RSE clean partition.  Debugger register restores
-            # must therefore bypass that setter when BSPSTORE is unchanged.
+            # makes RNAT undefined and discards cached backing-store state.
+            # Debugger restores must bypass it when BSPSTORE is unchanged.
             if rsp.request(
-                    f"M10,{len(RSE_CLEAN_PROGRAM):x}:"
-                    f"{RSE_CLEAN_PROGRAM.hex()}") != "OK":
+                    f"M10,{len(RSE_FLUSH_PROGRAM):x}:"
+                    f"{RSE_FLUSH_PROGRAM.hex()}") != "OK":
                 raise RuntimeError("GDB memory write for RSE probe failed")
             # ia64-vpc enters firmware with RSC.mode=lazy; mov-to-BSPSTORE
             # and flushrs require enforced-lazy mode (mode=0).
@@ -248,12 +250,22 @@ def test_gdbstub(qemu: str, qemu_img: str | None) -> None:
                     f"last IP was 0x{current_ip:x}")
 
             rse_before = _rse_state(qmp)
-            if rse_before[3] == 0:
+            if rse_before[3:] != (0, 0, 96):
                 raise RuntimeError(
-                    f"RSE probe did not establish a clean partition: "
+                    f"RSE probe did not establish the no-clean post-flush "
+                    f"state: "
                     f"{rse_before!r}")
             bspstore = _read_reg(rsp, 352, 8)
+            # The five spills define RNAT bit 0.  Calling the BSPSTORE setter
+            # would make it undefined and this target would read it as zero.
+            rnat_before = struct.pack("<Q", 1)
+            _expect_round_trip(rsp, 353, rnat_before)
             _write_reg(rsp, 352, bspstore)
+            rnat_after_p = _read_reg(rsp, 353, 8)
+            if rnat_after_p != rnat_before:
+                raise RuntimeError(
+                    "same-value AR.BSPSTORE P write changed AR.RNAT from "
+                    f"{rnat_before.hex()} to {rnat_after_p.hex()}")
             rse_after_p = _rse_state(qmp)
             if rse_after_p != rse_before:
                 raise RuntimeError(

@@ -979,8 +979,8 @@ test_rse_flushrs_clears_stale_rnat = require_registers(
         "r8": 0,
     }, entry=0x10)
 
-test_rse_merced_flushrs_invalidates_spilled_frame = require_registers(
-    "rse_merced_flushrs_invalidates_spilled_frame", [
+def _rse_flushrs_invalidates_spilled_frame_case(name, cpu):
+    return require_registers(name, [
         (0x10, *movl_mlx(3, 0x100000)),
         (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
         (0x30, 0x00, alloc(1, 5, 3, 0, 0), nop_i(), nop_i()),
@@ -999,7 +999,20 @@ test_rse_merced_flushrs_invalidates_spilled_frame = require_registers(
         "ip": 0x70,
         "r8": 0x2222,
         "exception": IA64_EXCP_NONE,
-    }, entry=0x10, cpu="merced")
+    }, entry=0x10, cpu=cpu)
+
+test_rse_merced_flushrs_invalidates_spilled_frame = \
+    _rse_flushrs_invalidates_spilled_frame_case(
+        "rse_merced_flushrs_invalidates_spilled_frame", "merced")
+
+test_rse_madison_flushrs_invalidates_spilled_frame = \
+    _rse_flushrs_invalidates_spilled_frame_case(
+        "rse_madison_flushrs_invalidates_spilled_frame", "madison")
+
+test_rse_montecito_flushrs_invalidates_spilled_frame = \
+    _rse_flushrs_invalidates_spilled_frame_case(
+        "rse_montecito_flushrs_invalidates_spilled_frame",
+        "montecito-9040")
 
 """Merced has no clean partition, but the backing-store coherence rule is the
 same: a suffix spill retains the collection prefix below BSPSTORE."""
@@ -6186,10 +6199,12 @@ CASE_NAMES = (
     'rse_mandatory_spill_consumes_psr_dd',
     'rse_mandatory_target_fill_debug_sets_isr_rs_ir',
     'rse_merced_flushrs_invalidates_spilled_frame',
+    'rse_madison_flushrs_invalidates_spilled_frame',
     'rse_merced_partial_rnat_store_preserves_backed_prefix',
     'rse_displaced_dispersal_survives_loadrs_physical_reuse',
     'rse_merced_respill_preserves_filled_rnat_prefix',
     'rse_merced_return_publishes_filled_rnat_collection',
+    'rse_montecito_flushrs_invalidates_spilled_frame',
     'rse_manual_rfi_loadrs_restores_current_frame_base',
     'rse_manual_rfi_smaller_frame_restores_current_frame_base',
     'rse_nested_alloc_call_preserves_output_arg',

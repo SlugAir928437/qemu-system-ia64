@@ -153,12 +153,13 @@ class Ia64Zx6000EfiTest(QemuSystemTest):
         root1_bus = bytes.fromhex(
             "88 0d 00 02 0c 00 00 00 40 00 4f 00 00 00 10 00"
         )
+        # These translated 32-bit windows use DWord Address Space descriptors.
         root0_mmio = struct.pack(
-            "<BHBBBQQQQQ", 0x8a, 43, 0, 0x0c, 1, 0, 0,
+            "<BHBBBIIIII", 0x87, 23, 0, 0x0c, 1, 0, 0,
             0x00ffffff, 0x90000000, 0x01000000
         )
         root1_mmio = struct.pack(
-            "<BHBBBQQQQQ", 0x8a, 43, 0, 0x0c, 1, 0, 0,
+            "<BHBBBIIIII", 0x87, 23, 0, 0x0c, 1, 0, 0,
             0x00ffffff, 0xa0000000, 0x01000000
         )
         for descriptor in (root0_bus, root1_bus, root0_mmio, root1_mmio):

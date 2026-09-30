@@ -126,6 +126,12 @@ config HP_ZX6000
     select USB_NEC_PCI
     select USB_HID
 
+config HP_ZX2000
+    bool
+    depends on IA64
+    select HP_ZX6000
+    select E1000_PCI
+
 config HP_RX2660
     bool
     depends on IA64

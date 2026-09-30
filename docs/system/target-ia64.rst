@@ -17,18 +17,19 @@ The machine models are grouped by processor generation:
   model.  ``itanium-vpc`` uses PS/2 input.  ``hp-i2000`` retains its PS/2
   controller and defaults to a USB keyboard and tablet.
 
-``itanium2-vpc`` and ``hp-zx6000`` (Itanium 2 generation)
-  ``itanium2-vpc`` defaults to the ``montecito-9050`` CPU model.  ``hp-zx6000``
-  emulates the HP zx1-based workstation and requires ``madison-1500``.
-  Both default to a USB keyboard and tablet.
+``itanium2-vpc``, ``hp-zx2000`` and ``hp-zx6000`` (Itanium 2 generation)
+  ``itanium2-vpc`` defaults to the ``montecito-9050`` CPU model.
+  ``hp-zx2000`` defaults to ``mckinley-900``; ``hp-zx6000`` requires
+  ``madison-1500``.  Both workstations use the HP zx1 chipset.
+  All three default to a USB keyboard and tablet.
 
 ``hp-rx2660`` (Montecito generation)
   Provides an HP Integrity rx2660 server model.  It defaults to the
   ``montecito-9010`` CPU model, 8 GiB of RAM, and a USB keyboard and tablet.
 
 ``ia64-vpc`` aliases ``itanium2-vpc``.  The virtual PC models support 64 CPUs,
-``hp-i2000`` and ``hp-zx6000`` two, and ``hp-rx2660`` eight.  Use
-``-accel tcg,thread=multi`` for more than one CPU.
+``hp-zx2000`` one, ``hp-i2000`` and ``hp-zx6000`` two, and ``hp-rx2660``
+eight.  Use ``-accel tcg,thread=multi`` for more than one CPU.
 
 ``-machine ...,usb1=on`` limits USB ports to low/full speed (1.5/12 Mb/s),
 including ports on hubs and hotplugged controllers.  Both the port and the
@@ -101,6 +102,31 @@ per-command autosense suppression, initiator IDs, queue depth and execution
 throttle settings are supported.  Queued requests and deadlines migrate.
 The 82559 Flash aperture contains no Flash storage.
 ``-vga ati`` places an ATI adapter at ``03:00.0``.
+
+HP zx2000 device layout
+-----------------------
+
+The zx2000 accepts ``mckinley-900`` (default) and ``madison-1400-1.5m``
+with one CPU.  RAM ranges from 512 MiB to 8 GiB, with a 1 GiB default.
+The model maps up to 1 GiB below the PCI aperture and the remainder at 4 GiB.
+
+Its four zx1 roots start at buses 00, 80, a0, and c0 on ropes 0, 4, 5,
+and 6.  Fixed devices are Radeon RV100 at ``00:00.0``, NEC USB at
+``a0:01.0`` through ``a0:01.2``, CMD649 IDE at ``a0:02.0``, and Intel
+82540EM Ethernet at ``a0:03.0``.  The default NIC model is ``e1000``.
+The NEC model exposes five EHCI ports and two OHCI companions.
+
+Disks and CD-ROMs default to IDE, with four devices across two channels.
+The provided EFI firmware detects only the primary channel; attach boot
+media using ``index=0`` or ``index=1``.
+
+The model provides NVRAM, RTC and ACPI support with the provided EFI
+firmware.  Its two PDH 16550 UARTs are at
+``0xff5e0000`` and ``0xff5e2000``.  FM801 audio, its gameport and BMC
+services are not emulated.  No onboard SCSI controller is instantiated.
+
+EFI PCI root device paths use expanded ACPI nodes with ``PNP0A03`` as
+the compatible ID.
 
 HP zx6000 device layout
 -----------------------
@@ -182,8 +208,9 @@ Graphics coverage
 The ATI models support high-color/true-color scanout and VBE modes.
 The HP bridge supplies matching ATI COMBIOS metadata in the legacy ROM shadow
 and the default PCI option ROM, and initializes the default Radeon memory and
-system clocks consistently with those tables.  Explicitly supplied option ROMs
-are preserved.  Radeon CRT detection and DDC/EDID are implemented.
+system clocks and CRT connection flags consistently with those tables.
+Explicitly supplied option ROMs are preserved.  Radeon CRT detection and
+DDC/EDID are implemented.
 The Radeon command processor handles rectangle fills and copies, transparent
 copies, connected lines, scanline spans, clipping, character bitmaps and
 indexed host bitmap uploads, including the setup-only packets used before
@@ -245,6 +272,18 @@ All machine models use ``ia64-firmware.bin`` by default.  QEMU searches its
 firmware and data directories for this file.  Use ``-bios PATH`` to load a
 different image, or ``-bios none`` when booting without firmware.
 
+The in-tree ``ia64-firmware.bin`` is an ELF image whose symbol and relocation
+tables must be retained.
+Firmware loads at 1 MiB by default.  Use ``-machine ...,firmware-base=0x400000``
+to load it at 4 MiB, or ``firmware-base=auto`` to select a location near the
+top of low RAM.  An explicit address must be at least 1 MiB, aligned to 8 KiB,
+and leave room for the complete firmware below the boot stack and handoff
+storage, without overlapping the ACPI tables at 8--8.125 MiB or the platform
+descriptor at 3 MiB on HP models.  QEMU rejects invalid placements before
+starting the CPUs.
+Legacy raw firmware images require the default 1 MiB address.
+Migration requires matching firmware placement at both ends.
+
 A typical invocation is::
 
   build/qemu-system-ia64 \
@@ -254,10 +293,34 @@ A typical invocation is::
 
 On ``hp-i2000`` and ``hp-zx6000``, disks without an explicit interface use
 SCSI and CD-ROMs use IDE; an explicit ``if=scsi`` or ``if=ide`` takes
-precedence.  On ``hp-rx2660``, both default to SCSI and no IDE controller is
-present.  On both virtual PC models, drives without an explicit interface use
-the LSI53C895A SCSI controller.  ``itanium2-vpc`` also provides AHCI; attach
+precedence.  On ``hp-zx2000``, both default to IDE.  On ``hp-rx2660``, both
+default to SCSI and no IDE controller is present.  On both virtual PC models,
+drives without an explicit interface use the LSI53C895A SCSI controller.
+``itanium2-vpc`` also provides AHCI; attach
 AHCI media with ``if=none`` and an explicit ``ide-hd`` or ``ide-cd`` device.
+
+The i2000 firmware enumerates both ISP12160 channels, targets 0--15 except
+initiator ID 7, and LUNs 0--31.  It also enumerates master and slave devices
+on both IDE channels.  Disks and optical drives may be mixed.  Each device
+has its own Block I/O handle; supported FAT partitions, whole-disk FAT,
+ISO9660/UDF volumes and El Torito FAT images appear in the EFI shell's
+``map`` output.  Use ``ls fsN:\`` to browse a volume and ``boot fsN:`` to
+load its ``\EFI\BOOT\BOOTIA64.EFI``.
+
+For example, attach a disk to the second SCSI channel at target 3, LUN 1::
+
+  -drive if=none,id=disk1,file=/path/to/disk1.qcow2,format=qcow2 \
+  -device scsi-hd,bus=isp12160-scsi.0,channel=1,scsi-id=3,lun=1,drive=disk1
+
+In the i2000 shell, ``edd30`` shows the saved SCSI device-path mode.
+``edd30 on`` selects native SCSI paths (the default); ``edd30 off`` selects
+EDD vendor paths.  Changes take effect after a reset and persist when
+NVRAM has a backing file.  Other machines report that the command is
+unsupported.
+EDD drive numbers are unique within each device class: disks use
+0x80--0xdf and optical drives use 0xe0--0xff.  Devices beyond these ranges
+remain available through native SCSI paths.  Adding or removing devices
+can change EDD numbering and the shell's ``fsN:`` assignments.
 
 Windows host clock resolution
 -----------------------------

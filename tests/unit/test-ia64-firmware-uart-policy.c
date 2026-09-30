@@ -7,6 +7,7 @@
 #include "fw-uart-policy.h"
 #include "dsdt-i2000.h"
 #include "ssdt-platform-devices.h"
+#include "ssdt-vpc-uart.h"
 
 #define TEST_LEGACY_IO_BASE 0x0000000100000000ULL
 #define TEST_LEGACY_IO_SIZE 0x0000000004000000ULL
@@ -159,8 +160,7 @@ static BOOLEAN byte_sequence_present(const UINT8 *haystack, UINTN haystack_size,
 static int test_i2000_dsdt_contract(void)
 {
     static const UINT8 pci_hid[] = {
-        0x08, '_', 'H', 'I', 'D', 0x0d,
-        'P', 'N', 'P', '0', 'A', '0', '3', 0x00,
+        0x08, '_', 'H', 'I', 'D', 0x0c, 0x41, 0xd0, 0x0a, 0x03,
     };
     static const UINT8 pci0[] = { 'P', 'C', 'I', '0' };
     static const UINT8 pci1[] = { 'P', 'C', 'I', '1' };
@@ -277,20 +277,14 @@ static int test_platform_ssdt_legacy_policy(void)
     static const UINT8 cpu63[] = { 'C', 'P', '6', '3' };
     static const UINT8 cpu0_enabled[] = { 'C', '0', 'E', 'N' };
     static const UINT8 cpu63_enabled[] = { 'E', '0', '6', '3' };
-    static const UINT8 uart[] = { 'U', 'A', 'R', '0' };
-    static const UINT8 uart_enabled[] = { 'U', '0', 'E', 'N' };
     static const UINT8 uart_hid[] = {
         0x08, '_', 'H', 'I', 'D', 0x0c, 0x41, 0xd0, 0x05, 0x01,
     };
-    static const UINT8 uart_io[] = {
-        0x47, 0x01, 0xf8, 0x03, 0xf8, 0x03, 0x01, 0x08,
-    };
-    static const UINT8 uart_irq[] = { 0x22, 0x10, 0x00 };
     static const UINT8 ps2_enabled[] = { 'P', '2', 'E', 'N' };
     static const UINT8 ps2_keyboard[] = { 'P', 'S', '2', 'K' };
     static const UINT8 ps2_mouse[] = { 'P', 'S', '2', 'M' };
     static const UINT8 pci0_scope[] = {
-        0x10, 0x49, 0x0b, 0x5c, 0x2e,
+        0x5c, 0x2e,
         '_', 'S', 'B', '_', 'P', 'C', 'I', '0',
     };
     static const UINT8 ps2k_device[] = {
@@ -308,9 +302,6 @@ static int test_platform_ssdt_legacy_policy(void)
     UINTN pci0_scope_offset = byte_sequence_offset(
         mSsdtAmlTemplate, sizeof(mSsdtAmlTemplate),
         pci0_scope, sizeof(pci0_scope));
-    UINTN uart_offset = byte_sequence_offset(
-        mSsdtAmlTemplate, sizeof(mSsdtAmlTemplate),
-        uart, sizeof(uart));
     UINTN ps2k_offset = byte_sequence_offset(
         mSsdtAmlTemplate, sizeof(mSsdtAmlTemplate),
         ps2k_device, sizeof(ps2k_device));
@@ -318,10 +309,9 @@ static int test_platform_ssdt_legacy_policy(void)
         mSsdtAmlTemplate, sizeof(mSsdtAmlTemplate),
         ps2m_device, sizeof(ps2m_device));
 
-    if (IA64_SSDT_AML_SIZE != 2242U ||
-        pci0_scope_offset == ~(UINTN)0 || uart_offset == ~(UINTN)0 ||
+    if (pci0_scope_offset == ~(UINTN)0 ||
         ps2k_offset == ~(UINTN)0 || ps2m_offset == ~(UINTN)0 ||
-        uart_offset <= pci0_scope_offset || ps2k_offset <= uart_offset ||
+        ps2k_offset <= pci0_scope_offset ||
         ps2m_offset <= ps2k_offset ||
         !byte_sequence_present(mSsdtAmlTemplate,
                                sizeof(mSsdtAmlTemplate),
@@ -335,18 +325,9 @@ static int test_platform_ssdt_legacy_policy(void)
         !byte_sequence_present(mSsdtAmlTemplate,
                                sizeof(mSsdtAmlTemplate),
                                cpu63_enabled, sizeof(cpu63_enabled)) ||
-        !byte_sequence_present(mSsdtAmlTemplate,
-                               sizeof(mSsdtAmlTemplate),
-                               uart_enabled, sizeof(uart_enabled)) ||
-        !byte_sequence_present(mSsdtAmlTemplate,
+        byte_sequence_present(mSsdtAmlTemplate,
                                sizeof(mSsdtAmlTemplate),
                                uart_hid, sizeof(uart_hid)) ||
-        !byte_sequence_present(mSsdtAmlTemplate,
-                               sizeof(mSsdtAmlTemplate),
-                               uart_io, sizeof(uart_io)) ||
-        !byte_sequence_present(mSsdtAmlTemplate,
-                               sizeof(mSsdtAmlTemplate),
-                               uart_irq, sizeof(uart_irq)) ||
         !byte_sequence_present(mSsdtAmlTemplate,
                                sizeof(mSsdtAmlTemplate),
                                ps2_enabled, sizeof(ps2_enabled)) ||
@@ -373,9 +354,52 @@ static int test_platform_ssdt_legacy_policy(void)
     return 0;
 }
 
+static int test_vpc_uart_ssdt(void)
+{
+    static const UINT8 uart[] = { 'U', 'A', 'R', '0' };
+    static const UINT8 pci0_scope[] = {
+        0x5c, 0x2e, '_', 'S', 'B', '_', 'P', 'C', 'I', '0',
+    };
+    static const UINT8 uart_hid[] = {
+        0x08, '_', 'H', 'I', 'D', 0x0c, 0x41, 0xd0, 0x05, 0x01,
+    };
+    static const UINT8 uart_uid[] = { 0x08, '_', 'U', 'I', 'D', 0x00 };
+    static const UINT8 uart_status[] = {
+        0x08, '_', 'S', 'T', 'A', 0x0a, 0x0f,
+    };
+    static const UINT8 uart_io[] = {
+        0x47, 0x01, 0xf8, 0x03, 0xf8, 0x03, 0x01, 0x08,
+    };
+    static const UINT8 uart_irq[] = { 0x22, 0x10, 0x00 };
+    UINTN pci0_scope_offset = byte_sequence_offset(
+        mVpcUartAmlTemplate, sizeof(mVpcUartAmlTemplate),
+        pci0_scope, sizeof(pci0_scope));
+    UINTN uart_offset = byte_sequence_offset(
+        mVpcUartAmlTemplate, sizeof(mVpcUartAmlTemplate),
+        uart, sizeof(uart));
+
+    return pci0_scope_offset == ~(UINTN)0 || uart_offset == ~(UINTN)0 ||
+        uart_offset <= pci0_scope_offset ||
+        !byte_sequence_present(mVpcUartAmlTemplate,
+                               sizeof(mVpcUartAmlTemplate),
+                               uart_hid, sizeof(uart_hid)) ||
+        !byte_sequence_present(mVpcUartAmlTemplate,
+                               sizeof(mVpcUartAmlTemplate),
+                               uart_uid, sizeof(uart_uid)) ||
+        !byte_sequence_present(mVpcUartAmlTemplate,
+                               sizeof(mVpcUartAmlTemplate),
+                               uart_status, sizeof(uart_status)) ||
+        !byte_sequence_present(mVpcUartAmlTemplate,
+                               sizeof(mVpcUartAmlTemplate),
+                               uart_io, sizeof(uart_io)) ||
+        !byte_sequence_present(mVpcUartAmlTemplate,
+                               sizeof(mVpcUartAmlTemplate),
+                               uart_irq, sizeof(uart_irq));
+}
+
 int main(void)
 {
     return test_i2000_policy() || test_sparse_register_addresses() ||
         test_policy_rejections() || test_i2000_dsdt_contract() ||
-        test_platform_ssdt_legacy_policy();
+        test_platform_ssdt_legacy_policy() || test_vpc_uart_ssdt();
 }

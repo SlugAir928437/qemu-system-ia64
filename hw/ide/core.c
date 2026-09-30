@@ -81,6 +81,12 @@ static const char *IDE_DMA_CMD_str(enum ide_dma_cmd enval)
 
 static void ide_dummy_transfer_stop(IDEState *s);
 
+static void ide_bus_clear_irq(IDEBus *bus)
+{
+    bus->irq_pending = false;
+    qemu_irq_lower(bus->irq);
+}
+
 const MemoryRegionPortio ide_portio_list[] = {
     { 0, 8, 1, .read = ide_ioport_read, .write = ide_ioport_write },
     { 0, 1, 2, .read = ide_data_readw, .write = ide_data_writew },
@@ -592,7 +598,9 @@ void ide_transfer_start(IDEState *s, uint8_t *buf, int size,
 
 static void ide_cmd_done(IDEState *s)
 {
-    if (s->bus->dma->ops->cmd_done) {
+    /* ATAPI DMA cleanup may precede its delayed command completion. */
+    if (s->bus->dma->ops->cmd_done &&
+        !timer_pending(s->atapi_complete_timer)) {
         s->bus->dma->ops->cmd_done(s->bus->dma);
     }
 }
@@ -842,7 +850,7 @@ void ide_set_inactive(IDEState *s, bool more)
     s->bus->dma->aiocb = NULL;
     ide_clear_retry(s);
     if (s->bus->dma->ops->set_inactive) {
-        s->bus->dma->ops->set_inactive(s->bus->dma, more);
+        s->bus->dma->ops->set_inactive(s->bus->dma, s, more);
     }
     ide_cmd_done(s);
 }
@@ -1340,7 +1348,7 @@ void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
     default:
     case ATA_IOPORT_WR_COMMAND:
         ide_clear_hob(bus);
-        qemu_irq_lower(bus->irq);
+        ide_bus_clear_irq(bus);
         ide_bus_exec_cmd(bus, val);
         break;
     }
@@ -1349,6 +1357,8 @@ void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 static void ide_reset(IDEState *s)
 {
     trace_ide_reset(s);
+
+    timer_del(s->atapi_complete_timer);
 
     if (s->pio_aiocb) {
         blk_aio_cancel(s->pio_aiocb);
@@ -2297,7 +2307,7 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
         } else {
             ret = s->status;
         }
-        qemu_irq_lower(bus->irq);
+        ide_bus_clear_irq(bus);
         break;
     }
 
@@ -2364,6 +2374,7 @@ void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
     /* Device0 and Device1 each have their own control register,
      * but QEMU models it as just one register in the controller. */
     if (!(bus->cmd & IDE_CTRL_RESET) && (val & IDE_CTRL_RESET)) {
+        ide_bus_clear_irq(bus);
         for (i = 0; i < 2; i++) {
             s = &bus->ifs[i];
             s->status |= BUSY_STAT;
@@ -2372,6 +2383,11 @@ void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
                                          ide_bus_perform_srst, bus);
     }
 
+    if ((bus->cmd ^ val) & IDE_CTRL_DISABLE_IRQ) {
+        /* nIEN gates INTRQ without acknowledging the pending interrupt. */
+        qemu_set_irq(bus->irq,
+                     bus->irq_pending && !(val & IDE_CTRL_DISABLE_IRQ));
+    }
     bus->cmd = val;
 }
 
@@ -2552,6 +2568,7 @@ void ide_bus_reset(IDEBus *bus)
     ide_reset(&bus->ifs[0]);
     ide_reset(&bus->ifs[1]);
     ide_clear_hob(bus);
+    ide_bus_clear_irq(bus);
 
     /* reset dma provider too */
     if (bus->dma->ops->reset) {
@@ -2687,6 +2704,8 @@ static void ide_init1(IDEBus *bus, int unit)
 
     s->sector_write_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                            ide_sector_write_timer_cb, s);
+    s->atapi_complete_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                         ide_atapi_cmd_complete_timer, s);
 }
 
 static int ide_nop_int(const IDEDMA *dma, bool is_write)
@@ -2809,6 +2828,7 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
 
 void ide_bus_set_irq(IDEBus *bus)
 {
+    bus->irq_pending = true;
     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) {
         qemu_irq_raise(bus->irq);
     }
@@ -2816,6 +2836,7 @@ void ide_bus_set_irq(IDEBus *bus)
 
 void ide_exit(IDEState *s)
 {
+    timer_free(s->atapi_complete_timer);
     timer_free(s->sector_write_timer);
     qemu_vfree(s->smart_selftest_data);
     qemu_vfree(s->io_buffer);
@@ -3024,6 +3045,7 @@ const VMStateDescription vmstate_ide_bus = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(cmd, IDEBus),
         VMSTATE_UINT8(unit, IDEBus),
+        VMSTATE_BOOL(irq_pending, IDEBus),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

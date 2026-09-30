@@ -364,6 +364,13 @@ static bool hp_zx6000_pdh_load_nvram(HPZX6000PDHState *s, Error **errp)
     return true;
 }
 
+static void hp_zx6000_pdh_uart_irq(void *opaque, int n, int level)
+{
+    HPZX6000PDHState *s = opaque;
+
+    qemu_set_irq(s->uart_irq[n], level);
+}
+
 static void hp_zx6000_pdh_realize(DeviceState *dev, Error **errp)
 {
     HPZX6000PDHState *s = HP_ZX6000_PDH(dev);
@@ -383,7 +390,8 @@ static void hp_zx6000_pdh_realize(DeviceState *dev, Error **errp)
         if (!sysbus_realize(SYS_BUS_DEVICE(uart), errp)) {
             return;
         }
-        sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0, s->uart_irq[i]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0,
+                           qdev_get_gpio_in_named(dev, "uart-irq", i));
         sysbus_init_mmio(sbd,
                          sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0));
     }
@@ -446,6 +454,8 @@ static void hp_zx6000_pdh_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     unsigned int i;
 
+    qdev_init_gpio_in_named(DEVICE(obj), hp_zx6000_pdh_uart_irq,
+                            "uart-irq", HP_ZX6000_PDH_UART_COUNT);
     for (i = 0; i < HP_ZX6000_PDH_UART_COUNT; i++) {
         g_autofree char *name = g_strdup_printf("uart[%u]", i);
         g_autofree char *property = g_strdup_printf("chardev%u", i);
@@ -463,9 +473,6 @@ static int hp_zx6000_pdh_post_load(void *opaque, int version_id)
     HPZX6000PDHState *s = opaque;
     uint16_t pm_enable;
 
-    if (version_id < 2) {
-        hp_zx6000_pdh_reset(DEVICE(s));
-    }
     pm_enable = s->acpi_regs.pm1.evt.en;
     qemu_system_wakeup_enable(
         QEMU_WAKEUP_REASON_RTC,
@@ -480,22 +487,22 @@ static int hp_zx6000_pdh_post_load(void *opaque, int version_id)
 static const VMStateDescription vmstate_hp_zx6000_pdh = {
     .name = TYPE_HP_ZX6000_PDH,
     .version_id = 3,
-    .minimum_version_id = 1,
+    .minimum_version_id = 3,
     .post_load = hp_zx6000_pdh_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(nvram_data, HPZX6000PDHState,
                             HP_ZX6000_PDH_NVRAM_SIZE),
         VMSTATE_INT64(rtc_offset, HPZX6000PDHState),
-        VMSTATE_UINT16_V(acpi_regs.pm1.evt.sts, HPZX6000PDHState, 2),
-        VMSTATE_UINT16_V(acpi_regs.pm1.evt.en, HPZX6000PDHState, 2),
-        VMSTATE_UINT16_V(acpi_regs.pm1.cnt.cnt, HPZX6000PDHState, 2),
-        VMSTATE_TIMER_PTR_V(acpi_regs.tmr.timer, HPZX6000PDHState, 2),
-        VMSTATE_INT64_V(acpi_regs.tmr.overflow_time, HPZX6000PDHState, 2),
+        VMSTATE_UINT16(acpi_regs.pm1.evt.sts, HPZX6000PDHState),
+        VMSTATE_UINT16(acpi_regs.pm1.evt.en, HPZX6000PDHState),
+        VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, HPZX6000PDHState),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, HPZX6000PDHState),
+        VMSTATE_INT64(acpi_regs.tmr.overflow_time, HPZX6000PDHState),
         VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.sts,
-                                      HPZX6000PDHState, 3,
+                                      HPZX6000PDHState, 0,
                                       IA64_PLATFORM_ACPI_GPE0_LENGTH),
         VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.en,
-                                      HPZX6000PDHState, 3,
+                                      HPZX6000PDHState, 0,
                                       IA64_PLATFORM_ACPI_GPE0_LENGTH),
         VMSTATE_END_OF_LIST()
     },

@@ -1130,6 +1130,10 @@ fuse_co_write(FuseExport *exp, struct fuse_write_out *out,
     }
 
     if (offset >= blk_len && !exp->growable) {
+        /* A nonempty write beyond the fixed capacity cannot make progress. */
+        if (size) {
+            return -ENOSPC;
+        }
         *out = (struct fuse_write_out) {
             .size = 0,
         };

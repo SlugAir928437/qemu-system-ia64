@@ -32,12 +32,16 @@ struct QOHCI_PCI {
 #define OHCI_INTR_DISABLE     0x14
 #define OHCI_HCCA             0x18
 #define OHCI_CONTROL_HEAD_ED  0x20
+#define OHCI_RH_DESCRIPTOR_A  0x48
+#define OHCI_RH_STATUS        0x50
 #define OHCI_RH_PORT_STATUS_1 0x54
 #define OHCI_USB_RESUME       0x40
 #define OHCI_USB_OPERATIONAL  0x80
 #define OHCI_USB_SUSPEND      0xc0
 #define OHCI_CONTROL_CLE      (1U << 4)
+#define OHCI_CONTROL_PLE      (1U << 2)
 #define OHCI_COMMAND_CLF      (1U << 1)
+#define OHCI_INTR_WD          (1U << 1)
 #define OHCI_INTR_RD          (1U << 3)
 #define OHCI_INTR_RHSC        (1U << 6)
 #define OHCI_INTR_MIE         (1U << 31)
@@ -51,6 +55,7 @@ struct QOHCI_PCI {
 #define OHCI_PORT_PRSC        (1U << 20)
 #define OHCI_PORT_LSDA        (1U << 9)
 #define OHCI_PORT_CHANGES     (0x1fU << 16)
+#define OHCI_RH_NPS           (1U << 9)
 #define OHCI_RESUME_SIGNAL_NS (20 * NANOSECONDS_PER_SECOND / 1000)
 #define OHCI_RESUME_EOP_NS    (3 * NANOSECONDS_PER_SECOND / 1500000)
 #define OHCI_RESUME_RECOVERY_NS (3 * NANOSECONDS_PER_SECOND / 1000)
@@ -492,6 +497,86 @@ static void ohci_wake_key(bool down)
         "{'type':'qcode','data':'a'}}}]}}", down);
 }
 
+static void ohci_keyboard_interrupt_transfer(OHCIWakeTest *test, bool down)
+{
+    uint32_t ed = test->dma + 0x200;
+    uint32_t td = ed + 0x10;
+    uint32_t tail = ed + 0x20;
+    uint32_t buffer = ed + 0x30;
+    uint32_t descriptors[] = {
+        cpu_to_le32(1 | (1 << 7) | (2 << 11) | (8 << 16)),
+        cpu_to_le32(tail), cpu_to_le32(td), 0,
+        cpu_to_le32(0xf0000000U | (2 << 24)),
+        cpu_to_le32(buffer), cpu_to_le32(tail), cpu_to_le32(buffer + 7),
+        0, 0, 0, 0,
+    };
+    uint8_t report[8];
+    uint8_t expected[8] = { 0, 0, down ? 4 : 0 };
+
+    qtest_memwrite(global_qtest, ed, descriptors, sizeof(descriptors));
+    qtest_memset(global_qtest, buffer, 0xa5, sizeof(report));
+    for (unsigned int i = 0; i < 32; i++) {
+        qtest_writel(global_qtest, test->dma + 4 * i, ed);
+    }
+    qpci_io_writel(test->dev, resume_bar, OHCI_INTR_STATUS, ~0U);
+    qpci_io_writel(test->dev, resume_bar, OHCI_INTR_ENABLE,
+                   OHCI_INTR_MIE | OHCI_INTR_WD | OHCI_INTR_RHSC);
+    qpci_io_writel(test->dev, resume_bar, OHCI_CONTROL,
+                   OHCI_USB_OPERATIONAL | OHCI_CONTROL_PLE);
+    ohci_wake_key(down);
+    qtest_clock_step(global_qtest, 2 * NANOSECONDS_PER_SECOND / 1000);
+
+    qtest_memread(global_qtest, ed, descriptors, sizeof(descriptors));
+    g_assert_cmphex(le32_to_cpu(descriptors[2]) & ~0xfU, ==, tail);
+    g_assert_cmphex(le32_to_cpu(descriptors[2]) & 1, ==, 0);
+    g_assert_cmphex(le32_to_cpu(descriptors[4]) >> 28, ==, 0);
+    g_assert_cmphex(qtest_readl(global_qtest, test->dma + 0x84) & ~1U,
+                    ==, td);
+    qtest_memread(global_qtest, buffer, report, sizeof(report));
+    g_assert_cmpmem(report, sizeof(report), expected, sizeof(expected));
+    g_assert_cmphex(ohci_wake_interrupts(test) &
+                    (OHCI_INTR_WD | OHCI_INTR_RHSC), ==, OHCI_INTR_WD);
+    g_assert_true(ohci_wake_irq(test));
+    qpci_io_writel(test->dev, resume_bar, OHCI_INTR_STATUS, OHCI_INTR_WD);
+    g_assert_false(ohci_wake_irq(test));
+    qpci_io_writel(test->dev, resume_bar, OHCI_CONTROL, OHCI_USB_OPERATIONAL);
+}
+
+static void test_ohci_no_power_switching(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    static const struct {
+        uint32_t offset;
+        uint32_t value;
+    } writes[] = {
+        { OHCI_RH_STATUS, 1 },
+        { OHCI_RH_PORT_STATUS_1, OHCI_PORT_LSDA },
+    };
+    OHCIWakeTest test;
+    uint32_t status;
+
+    ohci_wake_init(&test, obj, alloc, false);
+    g_assert_cmphex(qpci_io_readl(test.dev, resume_bar, OHCI_RH_DESCRIPTOR_A) &
+                    OHCI_RH_NPS, ==, OHCI_RH_NPS);
+    status = ohci_wake_port(&test, 0);
+    g_assert_cmphex(status & (OHCI_PORT_CCS | OHCI_PORT_PES), ==,
+                    OHCI_PORT_CCS | OHCI_PORT_PES);
+    qpci_io_writel(test.dev, resume_bar, OHCI_INTR_DISABLE, ~0U);
+    qpci_io_writel(test.dev, resume_bar, OHCI_INTR_ENABLE,
+                   OHCI_INTR_MIE | OHCI_INTR_RHSC);
+
+    for (unsigned int i = 0; i < G_N_ELEMENTS(writes); i++) {
+        qpci_io_writel(test.dev, resume_bar, writes[i].offset, writes[i].value);
+        g_assert_cmphex(ohci_wake_port(&test, 0), ==, status);
+        g_assert_cmphex(ohci_wake_interrupts(&test) & OHCI_INTR_RHSC, ==, 0);
+        g_assert_false(ohci_wake_irq(&test));
+        ohci_wake_control(&test, 1, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                          0x0b, 0); /* HID SET_PROTOCOL: boot protocol. */
+        ohci_keyboard_interrupt_transfer(&test, i == 0);
+    }
+    ohci_wake_cleanup(&test, false);
+}
+
 static void ohci_wake_tablet(void)
 {
     qtest_qmp_assert_success(global_qtest,
@@ -733,8 +818,6 @@ static void test_ohci_remote_wakeup_cancel(void *obj, void *data,
         qtest_qmp_device_del(global_qtest, "wake-kbd");
     } else if (mode == 2) {
         ohci_wake_port_write(&test, 0, OHCI_PORT_CCS);
-    } else if (mode == 3) {
-        ohci_wake_port_write(&test, 0, OHCI_PORT_LSDA);
     } else {
         ohci_wake_port_write(&test, 0, OHCI_PORT_PRS);
     }
@@ -905,9 +988,6 @@ static void register_ohci_pci_test(void)
     static QOSGraphTestOptions remote_disable_opts = {
         .arg = GINT_TO_POINTER(2),
     };
-    static QOSGraphTestOptions remote_poweroff_opts = {
-        .arg = GINT_TO_POINTER(3),
-    };
     static QOSGraphTestOptions remote_pending_suspend_opts = {
         .arg = GINT_TO_POINTER(1),
     };
@@ -952,8 +1032,8 @@ static void register_ohci_pci_test(void)
                  test_ohci_remote_wakeup_cancel, &remote_unplug_opts);
     qos_add_test("ohci_pci-test-remote-wakeup-port-disable", "pci-ohci",
                  test_ohci_remote_wakeup_cancel, &remote_disable_opts);
-    qos_add_test("ohci_pci-test-remote-wakeup-poweroff", "pci-ohci",
-                 test_ohci_remote_wakeup_cancel, &remote_poweroff_opts);
+    qos_add_test("ohci_pci-test-no-power-switching", "pci-ohci",
+                 test_ohci_no_power_switching, NULL);
     qos_add_test("ohci_pci-test-remote-wakeup-savevm", "pci-ohci",
                  test_ohci_remote_wakeup_savevm, &resume_savevm_opts);
 }

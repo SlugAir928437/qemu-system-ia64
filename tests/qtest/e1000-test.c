@@ -56,6 +56,48 @@ static void *e1000_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
     return &e1000->obj;
 }
 
+static void e1000_hp_pci_layout(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QPCIDevice *dev = &((QE1000 *)obj)->dev;
+    QPCIBar mmio;
+    uint16_t checksum = 0;
+
+    g_assert_cmphex(qpci_config_readb(dev, PCI_REVISION_ID), ==, 2);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x103c);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_SUBSYSTEM_ID), ==, 0x1274);
+    qpci_config_writel(dev, PCI_BASE_ADDRESS_1, UINT32_MAX);
+    g_assert_cmphex(qpci_config_readl(dev, PCI_BASE_ADDRESS_1), ==, 0);
+    qpci_config_writel(dev, PCI_BASE_ADDRESS_2, UINT32_MAX);
+    g_assert_cmphex(qpci_config_readl(dev, PCI_BASE_ADDRESS_2), ==, 0xffffffc1);
+    qpci_config_writel(dev, PCI_BASE_ADDRESS_2, 0);
+    qpci_device_enable(dev);
+    mmio = qpci_iomap(dev, 0, NULL);
+
+    for (unsigned int index = 0; index < 64; index++) {
+        uint32_t value;
+        uint16_t word;
+
+        qpci_io_writel(dev, mmio, E1000_EERD,
+                       (index << E1000_EEPROM_RW_ADDR_SHIFT) |
+                       E1000_EEPROM_RW_REG_START);
+        value = qpci_io_readl(dev, mmio, E1000_EERD);
+        g_assert_cmphex(value & E1000_EEPROM_RW_REG_DONE, !=, 0);
+        word = value >> E1000_EEPROM_RW_REG_DATA;
+        checksum += word;
+        if (index == 0x0b) {
+            g_assert_cmphex(word, ==, 0x1274);
+        } else if (index == 0x0c) {
+            g_assert_cmphex(word, ==, 0x103c);
+        } else if (index == 0x0d) {
+            g_assert_cmphex(word, ==, 0x100e);
+        }
+    }
+    g_assert_cmphex(checksum, ==, EEPROM_SUM);
+    qpci_iounmap(dev, mmio);
+}
+
 static void e1000_completion_delays(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -437,6 +479,11 @@ static void e1000_register_nodes(void)
         .extra_device_opts = "addr=04.0",
     };
     QOSGraphEdgeOptions ia64_opts = { .extra_device_opts = "addr=07.0" };
+    QOSGraphTestOptions hp_opts = {
+        .edge.extra_device_opts =
+            "io-bar=2,x-pci-revision=2,x-pci-subsystem-vendor-id=0x103c,"
+            "x-pci-subsystem-id=0x1274",
+    };
 
     add_qpci_address(&ia64_opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(7, 0) });
     add_qpci_address(&opts, &(QPCIAddress) { .devfn = QPCI_DEVFN(4, 0) });
@@ -457,6 +504,7 @@ static void e1000_register_nodes(void)
         qos_add_test("mac-reset-autoneg", models[i],
                      e1000_mac_reset_autoneg, NULL);
     }
+    qos_add_test("hp-pci-layout", "e1000", e1000_hp_pci_layout, &hp_opts);
 }
 
 libqos_init(e1000_register_nodes);

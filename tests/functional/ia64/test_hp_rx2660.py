@@ -9,6 +9,7 @@ from pathlib import Path
 
 from qemu_test import QemuSystemTest, wait_for_console_pattern
 
+from ia64.acpi import assert_pci_windows, io_window, memory_window
 from ia64.efi_build import app_path, build_root
 from ia64.media import make_fat_disk
 from ia64.protocol import wait_for_suite
@@ -18,13 +19,13 @@ ACPI_RECLAIM_BASE = 0x00800000
 ACPI_RECLAIM_TABLE_BASE = 0x00802000
 ACPI_RECLAIM_END = 0x00820000
 ACPI_HEADER_SIZE = 36
-RX2660_LEGACY_IO_BASE = 0x00000FFFFC000000
 SBA0_PATH = b"\x5c\x2e_SB_SBA0"
 PCI0_PATH = b"\x5c\x2e_SB_PCI0"
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
     "root-device-path", "controller-device-path", "console-output",
     "console-variables",
+    "low-memory-allocation",
 }
 
 
@@ -179,30 +180,22 @@ class HPRx2660Boot(QemuSystemTest):
             self.assertIn(root, aml)
         self.assertEqual(aml.count(b"_PRT"), 2)
 
-        def qword_io(minimum, maximum, length):
-            return (
-                b"\x8a\x2b\x00\x01\x0c\x33" +
-                struct.pack("<QQQQQ", 0, minimum, maximum,
-                            RX2660_LEGACY_IO_BASE, length)
-            )
-
-        def dword_memory(minimum, maximum, translation, length):
-            return (
-                b"\x87\x17\x00\x00\x0c\x01" +
-                struct.pack("<IIIII", 0, minimum, maximum,
-                            translation, length)
-            )
-
-        self.assertEqual(aml.count(qword_io(0x0000, 0x1FFF, 0x2000)), 1)
-        for minimum in range(0x2000, 0xA000, 0x2000):
-            self.assertEqual(
-                aml.count(qword_io(minimum, minimum + 0x1FFF, 0x2000)), 1
-            )
-        self.assertEqual(
-            aml.count(dword_memory(0x000A0000, 0x000FFFFF,
-                                   0, 0x00060000)),
-            1 if graphics else 0,
-        )
+        windows = []
+        for index, (ports, mmio32, mmio64) in enumerate((
+            (0x0000, 0x80000000, 0x80004000000),
+            (0x4000, 0xA0000000, 0x80204000000),
+            (0x2000, 0xB0000000, 0x80304000000),
+            (0x6000, 0xE0000000, 0x80604000000),
+            (0x8000, 0xF0000000, 0x80704000000),
+        )):
+            root = [io_window(ports, 0x2000)]
+            if graphics and index == 0:
+                root.append(memory_window(0xA0000, 0x60000))
+            root += [memory_window(mmio32, 0xE000000 if index == 4
+                                   else 0x10000000),
+                     memory_window(mmio64, 0xFC000000, width=8)]
+            windows.append(root)
+        assert_pci_windows(self, aml, windows)
 
         ssdt_aml = tables[b"SSDT"][ACPI_HEADER_SIZE:]
         self.assertEqual(ssdt_aml.count(SBA0_PATH), 1)

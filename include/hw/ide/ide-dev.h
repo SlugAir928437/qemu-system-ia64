@@ -104,6 +104,7 @@ struct IDEState {
     int lba;
     int cd_sector_size;
     int atapi_dma; /* true if dma is requested for the packet cmd */
+    QEMUTimer *atapi_complete_timer;
     BlockAcctCookie acct;
     BlockAIOCB *pio_aiocb;
     QEMUIOVector qiov;

@@ -1481,6 +1481,11 @@ static void ohci_set_frame_interval(OHCIState *ohci, uint16_t val)
 
 static void ohci_port_power(OHCIState *ohci, int i, int p)
 {
+    /* NPS ports stay powered while the host controller is powered. */
+    if (ohci->rhdesc_a & OHCI_RHA_NPS) {
+        return;
+    }
+
     if (p) {
         ohci->rhport[i].ctrl |= OHCI_PORT_PPS;
     } else {

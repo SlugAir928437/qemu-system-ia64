@@ -513,7 +513,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         goto raise_exception;
     }
 
-    if (ia64_firmware_identity_pa(cpu->env.cr_iva, cpu->env.psr,
+    if (ia64_firmware_identity_pa(&cpu->env,
                                   addr, &pa)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
@@ -787,6 +787,28 @@ raise_exception:
     cpu_loop_exit_restore(cs, retaddr);
 }
 
+
+bool ia64_firmware_contains(CPUIA64State *env, uint64_t address)
+{
+    IA64CPU *cpu = env_archcpu(env);
+    uint64_t base = cpu->boot_info_valid ? cpu->boot_info.firmware_base :
+                    IA64_FW_IDENTITY_BASE;
+    uint64_t size = cpu->boot_info_valid ? cpu->boot_info.firmware_size :
+                    IA64_FW_IDENTITY_SIZE;
+
+    return address >= base && address - base < size;
+}
+
+bool ia64_firmware_identity_pa(CPUIA64State *env, uint64_t va, uint64_t *pa)
+{
+    if ((env->psr & IA64_PSR_CPL_MASK) == 0 &&
+        ia64_firmware_owns_iva(env->cr_iva) &&
+        ia64_firmware_contains(env, va)) {
+        *pa = va;
+        return true;
+    }
+    return false;
+}
 
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info)
 {
@@ -2120,7 +2142,8 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->implemented_pmd_mask = 0x3ffffULL;
     icc->perf_cycles_mask = 0xf0ULL;
     icc->perf_retired_mask = 0xf0ULL;
-    icc->rse_has_clean_partition = true;
+    /* Intel document 308065-001, table 4-40: the clean count is always zero. */
+    icc->rse_has_clean_partition = false;
     icc->has_native_ia32 = false;
     icc->has_virtualization = true;
     icc->is_montecito = true;
@@ -2374,7 +2397,8 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .implemented_pmd_mask = 0x3ffffULL,
     .perf_cycles_mask = 0xf0ULL,
     .perf_retired_mask = 0xf0ULL,
-    .rse_has_clean_partition = true,
+    /* Intel document 251110-003, table 11-35: clean count is always zero. */
+    .rse_has_clean_partition = false,
     /* Intel order 251110-003, section 12.3. */
     .data_debug_cross_16byte = true,
     .has_native_ia32 = true,
@@ -2432,7 +2456,8 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     .implemented_pmd_mask = 0x3ffffULL,
     .perf_cycles_mask = 0xf0ULL,
     .perf_retired_mask = 0xf0ULL,
-    .rse_has_clean_partition = true,
+    /* Intel document 308065-001, table 4-40: clean count is always zero. */
+    .rse_has_clean_partition = false,
     /* Native IA-32 and PAL-based IA-32 translation are not implemented. */
     .has_native_ia32 = false,
     /* Virtualization mode is not modeled; vmsw raises Virtualization Fault. */

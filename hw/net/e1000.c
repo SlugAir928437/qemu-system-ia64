@@ -26,6 +26,7 @@
 
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/net/mii.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
@@ -87,6 +88,10 @@ struct E1000State_st {
     NICConf conf;
     MemoryRegion mmio;
     MemoryRegion io;
+    uint8_t io_bar;
+    uint8_t pci_revision_override;
+    uint16_t pci_subsystem_vendor_override;
+    uint16_t pci_subsystem_override;
 
     uint32_t mac_reg[0x8000];
     uint16_t phy_reg[0x20];
@@ -1749,9 +1754,25 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
     uint8_t *pci_conf;
     uint8_t *macaddr;
 
+    if (d->io_bar != 1 && d->io_bar != 2) {
+        error_setg(errp, "e1000 io-bar must be 1 or 2");
+        return;
+    }
+
     pci_dev->config_write = e1000_write_config;
 
     pci_conf = pci_dev->config;
+    if (d->pci_revision_override != UINT8_MAX) {
+        pci_config_set_revision(pci_conf, d->pci_revision_override);
+    }
+    if (d->pci_subsystem_vendor_override != UINT16_MAX) {
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID,
+                     d->pci_subsystem_vendor_override);
+    }
+    if (d->pci_subsystem_override != UINT16_MAX) {
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
+                     d->pci_subsystem_override);
+    }
 
     /* TODO: RST# value should be 0, PCI spec 6.2.4 */
     pci_conf[PCI_CACHE_LINE_SIZE] = 0x10;
@@ -1762,7 +1783,7 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
 
-    pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &d->io);
+    pci_register_bar(pci_dev, d->io_bar, PCI_BASE_ADDRESS_SPACE_IO, &d->io);
 
     qemu_macaddr_default_if_unset(&d->conf.macaddr);
     macaddr = d->conf.macaddr.a;
@@ -1772,6 +1793,16 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
                                sizeof(e1000_eeprom_template),
                                PCI_DEVICE_GET_CLASS(pci_dev)->device_id,
                                macaddr);
+    if (d->pci_subsystem_vendor_override != UINT16_MAX) {
+        d->eeprom_data[EEPROM_CHECKSUM_REG] +=
+            d->eeprom_data[0x0c] - d->pci_subsystem_vendor_override;
+        d->eeprom_data[0x0c] = d->pci_subsystem_vendor_override;
+    }
+    if (d->pci_subsystem_override != UINT16_MAX) {
+        d->eeprom_data[EEPROM_CHECKSUM_REG] +=
+            d->eeprom_data[0x0b] - d->pci_subsystem_override;
+        d->eeprom_data[0x0b] = d->pci_subsystem_override;
+    }
 
     d->nic = qemu_new_nic(&net_e1000_info, &d->conf,
                           object_get_typename(OBJECT(d)), dev->id,
@@ -1791,6 +1822,13 @@ static void pci_e1000_realize(PCIDevice *pci_dev, Error **errp)
 
 static const Property e1000_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000State, conf),
+    DEFINE_PROP_UINT8("io-bar", E1000State, io_bar, 1),
+    DEFINE_PROP_UINT8("x-pci-revision", E1000State,
+                      pci_revision_override, UINT8_MAX),
+    DEFINE_PROP_UINT16("x-pci-subsystem-vendor-id", E1000State,
+                       pci_subsystem_vendor_override, UINT16_MAX),
+    DEFINE_PROP_UINT16("x-pci-subsystem-id", E1000State,
+                       pci_subsystem_override, UINT16_MAX),
     DEFINE_PROP_BIT("migrate_tso_props", E1000State,
                     compat_flags, E1000_FLAG_TSO_BIT, true),
     DEFINE_PROP_BIT("init-vet", E1000State,

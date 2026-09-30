@@ -288,8 +288,10 @@ static int bmdma_rw_buf(const IDEDMA *dma, bool is_write)
         if (bm->cur_prd_len == 0) {
             /* end of table (with a fail safe of one page) */
             if (bm->cur_prd_last ||
-                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE)
+                (bm->cur_addr - bm->addr) >= BMDMA_PAGE_SIZE) {
+                bm->status &= ~BM_STATUS_DMAING;
                 return 0;
+            }
             pci_dma_read(pci_dev, bm->cur_addr, &prd, 8);
             bm->cur_addr += 8;
             prd.addr = le32_to_cpu(prd.addr);
@@ -314,15 +316,22 @@ static int bmdma_rw_buf(const IDEDMA *dma, bool is_write)
             bm->cur_prd_addr += l;
             bm->cur_prd_len -= l;
             s->io_buffer_index += l;
+            if (bm->cur_prd_last && bm->cur_prd_len == 0) {
+                bm->status &= ~BM_STATUS_DMAING;
+            }
         }
     }
     return 1;
 }
 
-static void bmdma_set_inactive(const IDEDMA *dma, bool more)
+static void bmdma_set_inactive(const IDEDMA *dma, IDEState *s, bool more)
 {
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
 
+    /* ATAPI completion does not imply that the PRD table was exhausted. */
+    if (s && s->drive_kind == IDE_CD && s->atapi_dma) {
+        more = (bm->status & BM_STATUS_DMAING) != 0;
+    }
     bm->dma_cb = NULL;
     if (more) {
         bm->status |= BM_STATUS_DMAING;
@@ -342,7 +351,7 @@ static void bmdma_cancel(BMDMAState *bm)
 {
     if (bm->status & BM_STATUS_DMAING) {
         /* cancel DMA request */
-        bmdma_set_inactive(&bm->dma, false);
+        bmdma_set_inactive(&bm->dma, NULL, false);
     }
 }
 
@@ -391,8 +400,9 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
             if (!(bm->status & BM_STATUS_DMAING)) {
                 bm->status |= BM_STATUS_DMAING;
                 /* start dma transfer if possible */
-                if (bm->dma_cb)
+                if (bm->dma_cb) {
                     bm->dma_cb(bmdma_active_if(bm), 0);
+                }
             }
         }
     }

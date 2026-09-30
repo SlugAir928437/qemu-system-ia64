@@ -13,7 +13,7 @@ typedef void DMAVoidFunc(const IDEDMA *);
 typedef int DMAIntFunc(const IDEDMA *, bool);
 typedef int32_t DMAInt32Func(const IDEDMA *, int32_t len);
 typedef void DMAu32Func(const IDEDMA *, uint32_t);
-typedef void DMAStopFunc(const IDEDMA *, bool);
+typedef void DMAStopFunc(const IDEDMA *, IDEState *, bool);
 
 struct IDEDMAOps {
     DMAStartFunc *start_dma;

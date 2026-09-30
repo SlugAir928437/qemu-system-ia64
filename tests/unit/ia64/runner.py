@@ -105,7 +105,7 @@ def _command(qemu: str, program: MicroProgram, *, load: bool = True) -> list[str
     machine = program.machine
     machine_args = program.machine_args
     ia64_firmware_machines = {
-        "hp-i2000", "hp-rx2660", "hp-zx6000", "ia64-vpc",
+        "hp-i2000", "hp-rx2660", "hp-zx2000", "hp-zx6000", "ia64-vpc",
         "itanium-vpc", "itanium2-vpc",
     }
     if machine.split(",", 1)[0] in ia64_firmware_machines:

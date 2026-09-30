@@ -15,9 +15,9 @@ ia64_functional_test_apps = []
 foreach app : [
   'smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'graphics',
   'smp', 'smp-merced', 'pci-bridge', 'i2000-pci-root', 'i2000-runtime',
-  'i2000-loader', 'ras', 'scsi-pass-thru',
+  'i2000-loader', 'ras', 'scsi-pass-thru', 'smoke-fixed',
 ]
-  app_source = files('apps/' + app + '-app.c')
+  app_source = files('apps/' + (app == 'smoke-fixed' ? 'smoke' : app) + '-app.c')
   app_linker_script = ia64_app_linker_script
   if app == 'i2000-loader'
     app_linker_script = files('apps/i2000-loader-app.lds')
@@ -34,6 +34,9 @@ foreach app : [
     '@INPUT@',
     app_linker_script,
   ]
+  if app == 'smoke-fixed'
+    app_command += ['0x100000']
+  endif
   if app == 'services' or app == 'tables'
     app_depend_files += [ia64_services_common, ia64_services_header]
     app_command += ['0x4000000', ia64_services_common]
@@ -58,6 +61,7 @@ ia64_start_image_child = custom_target(
     ia64_app_builder,
     ia64_child_linker_script,
     ia64_app_header,
+    ia64_services_header,
   ],
   command: [
     ia64_app_sh,
@@ -95,6 +99,8 @@ tests_ia64_system_quick = [
      ['zx6000_efi'] : []) + \
     (config_all_devices.has_key('CONFIG_HP_I2000') ?
      ['hp_i2000'] : []) + \
+    (config_all_devices.has_key('CONFIG_HP_ZX2000') ?
+     ['hp_zx2000'] : []) + \
     (config_all_devices.has_key('CONFIG_HP_ZX6000') ?
      ['hp_zx6000'] : []) + \
     (config_all_devices.has_key('CONFIG_HP_RX2660') ?
@@ -116,7 +122,8 @@ test_ia64_timeouts = {
   'smp_merced': 900,
   'ras': 120,
   'zx6000_efi': 90,
-  'hp_i2000': 120,
+  'hp_i2000': 900,
+  'hp_zx2000': 120,
   'hp_zx6000': 120,
   'hp_rx2660': 120,
   'storage': 300,

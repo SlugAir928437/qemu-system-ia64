@@ -1615,6 +1615,112 @@ static void test_cdrom_dma_multi(void)
     ahci_test_cdrom_read10(3, true);
 }
 
+static void test_atapi_dma_nodata(gconstpointer opaque)
+{
+    bool error = GPOINTER_TO_UINT(opaque);
+    AHCIQState *ahci = ahci_boot_and_enable("-M q35 -device ide-cd");
+    QTestState *qts = ahci->parent->qts;
+    uint8_t port = ahci_port_select(ahci);
+    unsigned i, j;
+
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+
+    /* Follow the DMA completion immediately with a PIO command. */
+    for (i = 0; i < 2; i++) {
+        uint8_t opcode = i == 0 && error ? CMD_ATAPI_TEST_UNIT_READY :
+                                          CMD_ATAPI_START_STOP_UNIT;
+        AHCICommand *cmd = ahci_atapi_command_create(opcode, 0, i == 0);
+        uint32_t slot, status;
+
+        ahci_port_clear(ahci, port);
+        ahci_command_set_size(cmd, 0);
+        ahci_command_commit(ahci, cmd, port);
+        slot = 1U << ahci_command_slot(cmd);
+        ahci_command_issue_async(ahci, cmd);
+
+        for (j = 0; j < 100; j++) {
+            if (!(ahci_px_rreg(ahci, port, AHCI_PX_CI) & slot) ||
+                (ahci_px_rreg(ahci, port, AHCI_PX_IS) & AHCI_PX_IS_TFES)) {
+                break;
+            }
+            qtest_clock_step(qts, 1000000);
+        }
+        if (i == 0 && error) {
+            ASSERT_BIT_SET(ahci_px_rreg(ahci, port, AHCI_PX_IS),
+                           AHCI_PX_IS_TFES);
+            ASSERT_BIT_SET(ahci_px_rreg(ahci, port, AHCI_PX_CI), slot);
+            status = ahci_px_rreg(ahci, port, AHCI_PX_TFD);
+            ASSERT_BIT_CLEAR(status, AHCI_PX_TFD_STS_BSY | AHCI_PX_TFD_STS_DRQ);
+            ASSERT_BIT_SET(status, AHCI_PX_TFD_STS_ERR);
+            g_assert_cmphex((status & AHCI_PX_TFD_ERR) >> 8, ==,
+                            SENSE_NOT_READY << 4);
+            ahci_port_check_d2h_sanity(ahci, port, ahci_command_slot(cmd));
+
+            /* Restart the command engine after the task-file error. */
+            ahci_px_clr(ahci, port, AHCI_PX_CMD, AHCI_PX_CMD_ST);
+            usleep(500000);
+            ASSERT_BIT_CLEAR(ahci_px_rreg(ahci, port, AHCI_PX_CMD),
+                             AHCI_PX_CMD_CR);
+            ahci_port_clear(ahci, port);
+            ahci_px_set(ahci, port, AHCI_PX_CMD, AHCI_PX_CMD_ST);
+        } else {
+            ahci_command_verify(ahci, cmd);
+        }
+        ahci_command_free(cmd);
+    }
+
+    ahci_shutdown(ahci);
+}
+
+static void test_atapi_dma_read_error(void)
+{
+    AHCIQState *ahci;
+    AHCICommand *cmd;
+    QTestState *qts;
+    unsigned char *pattern;
+    char *iso;
+    uint64_t buffer;
+    uint32_t status;
+    uint8_t port;
+    unsigned i;
+    int fd = prepare_iso(ATAPI_SECTOR_SIZE, &pattern, &iso);
+
+    prepare_blkdebug_script(debug_path, "read_aio");
+    ahci = ahci_boot_and_enable(
+        "-M q35 -drive if=none,id=drive0,file=blkdebug:%s:%s,"
+        "format=raw,rerror=report -device ide-cd,drive=drive0",
+        debug_path, iso);
+    qts = ahci->parent->qts;
+    port = ahci_port_select(ahci);
+    qtest_qmp_assert_success(qts, "{'execute':'cont'}");
+    ahci_port_clear(ahci, port);
+
+    buffer = ahci_alloc(ahci, ATAPI_SECTOR_SIZE);
+    cmd = ahci_atapi_command_create(CMD_ATAPI_READ_10, ATAPI_SECTOR_SIZE, true);
+    ahci_command_set_size(cmd, ATAPI_SECTOR_SIZE);
+    ahci_command_set_buffer(cmd, buffer);
+    ahci_command_commit(ahci, cmd, port);
+    ahci_command_issue_async(ahci, cmd);
+    for (i = 0; i < 100; i++) {
+        if (ahci_px_rreg(ahci, port, AHCI_PX_IS) & AHCI_PX_IS_TFES) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+
+    ASSERT_BIT_SET(ahci_px_rreg(ahci, port, AHCI_PX_IS), AHCI_PX_IS_TFES);
+    status = ahci_px_rreg(ahci, port, AHCI_PX_TFD);
+    ASSERT_BIT_SET(status, AHCI_PX_TFD_STS_ERR);
+    ASSERT_BIT_CLEAR(status, AHCI_PX_TFD_STS_BSY | AHCI_PX_TFD_STS_DRQ);
+    ahci_port_check_d2h_sanity(ahci, port, ahci_command_slot(cmd));
+
+    ahci_command_free(cmd);
+    ahci_free(ahci, buffer);
+    ahci_shutdown(ahci);
+    g_free(pattern);
+    remove_iso(fd, iso);
+}
+
 static void test_cdrom_pio(void)
 {
     ahci_test_cdrom_read10(1, false);
@@ -1713,6 +1819,8 @@ static void test_atapi_tray(void)
     g_assert_cmpuint(sense, ==, SENSE_NOT_READY);
     g_assert_cmpuint(asc, ==, ASC_MEDIUM_NOT_PRESENT);
 
+    ahci_atapi_test_ready(ahci, port, false, SENSE_UNIT_ATTENTION);
+    /* UNIT ATTENTION remains pending until REQUEST SENSE clears it. */
     ahci_atapi_test_ready(ahci, port, false, SENSE_UNIT_ATTENTION);
     ahci_atapi_get_sense(ahci, port, &sense, &asc);
     g_assert_cmpuint(sense, ==, SENSE_UNIT_ATTENTION);
@@ -2037,6 +2145,11 @@ int main(int argc, char **argv)
 
     qtest_add_func("/ahci/cdrom/dma/single", test_cdrom_dma);
     qtest_add_func("/ahci/cdrom/dma/multi", test_cdrom_dma_multi);
+    qtest_add_data_func("/ahci/cdrom/dma/nodata",
+                       GUINT_TO_POINTER(0), test_atapi_dma_nodata);
+    qtest_add_data_func("/ahci/cdrom/dma/nodata-error",
+                       GUINT_TO_POINTER(1), test_atapi_dma_nodata);
+    qtest_add_func("/ahci/cdrom/dma/read-error", test_atapi_dma_read_error);
     qtest_add_func("/ahci/cdrom/pio/single", test_cdrom_pio);
     qtest_add_func("/ahci/cdrom/pio/multi", test_cdrom_pio_multi);
 

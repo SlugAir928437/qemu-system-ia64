@@ -472,13 +472,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - job_name: Windows x86-64 (MSYS2 MinGW GCC)
+          - job_name: Windows x86-64 (MSYS2 UCRT64 GCC)
             optimized: false
             build_dir: build-win64
             dist_stem: qemu-system-ia64-windows-x86_64
             archive: qemu-system-ia64-windows-x86_64.zip
             artifact_name: Windows-AMD64
-          - job_name: Windows x86-64-v2 optimized (MSYS2 MinGW GCC)
+          - job_name: Windows x86-64-v2 optimized (MSYS2 UCRT64 GCC)
             optimized: true
             build_dir: build-win64-x86_64-v2-optimized
             dist_stem: qemu-system-ia64-windows-x86_64-v2-optimized
@@ -500,7 +500,7 @@ jobs:
       - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             bison
@@ -511,28 +511,28 @@ jobs:
             grep
             make
             sed
-            mingw-w64-x86_64-adwaita-icon-theme
-            mingw-w64-x86_64-adwaita-icon-theme-legacy
-            mingw-w64-x86_64-binutils
-            mingw-w64-x86_64-dtc
-            mingw-w64-x86_64-fontconfig
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-gdk-pixbuf2
-            mingw-w64-x86_64-glib2
-            mingw-w64-x86_64-gtk3
-            mingw-w64-x86_64-gtk-update-icon-cache
-            mingw-w64-x86_64-hicolor-icon-theme
-            mingw-w64-x86_64-librsvg
-            mingw-w64-x86_64-libslirp
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-pixman
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-python
-            mingw-w64-x86_64-python-setuptools
-            mingw-w64-x86_64-python-wheel
-            mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-shared-mime-info
-            mingw-w64-x86_64-zlib
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme-legacy
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-dtc
+            mingw-w64-ucrt-x86_64-fontconfig
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gdk-pixbuf2
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-gtk3
+            mingw-w64-ucrt-x86_64-gtk-update-icon-cache
+            mingw-w64-ucrt-x86_64-hicolor-icon-theme
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-setuptools
+            mingw-w64-ucrt-x86_64-python-wheel
+            mingw-w64-ucrt-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-shared-mime-info
+            mingw-w64-ucrt-x86_64-zlib
 
       - name: Configure and build the Windows emulator
         run: |
@@ -574,7 +574,7 @@ jobs:
             env "${configure_env[@]}" ../configure \
               "${optimization_args[@]}" \
               --prefix="$install_dir" \
-              --python=/mingw64/bin/python \
+              --python=/ucrt64/bin/python \
               --target-list=ia64-softmmu \
               --enable-system \
               --enable-tcg \
@@ -656,8 +656,8 @@ jobs:
           # GLib locates these helpers by name at runtime; they do not appear
           # in the executable's PE import table.
           install -m 0755 \
-            /mingw64/bin/gspawn-win64-helper.exe \
-            /mingw64/bin/gspawn-win64-helper-console.exe \
+            /ucrt64/bin/gspawn-win64-helper.exe \
+            /ucrt64/bin/gspawn-win64-helper-console.exe \
             "$dist/"
 
           install -m 0644 \
@@ -677,38 +677,38 @@ jobs:
 
           # GTK loads these resources and modules at runtime rather than
           # expressing them as executable DLL imports.
-          cp -aL /mingw64/etc/fonts "$dist/etc/"
-          cp -aL /mingw64/etc/gtk-3.0 "$dist/etc/"
-          cp -aL /mingw64/lib/gdk-pixbuf-2.0 "$dist/lib/"
-          cp -aL /mingw64/lib/gtk-3.0 "$dist/lib/"
-          cp -aL /mingw64/share/fontconfig "$dist/share/"
-          cp -aL /mingw64/share/glib-2.0 "$dist/share/"
-          cp -aL /mingw64/share/gtk-3.0 "$dist/share/"
-          cp -aL /mingw64/share/icons/Adwaita "$dist/share/icons/"
-          cp -aL /mingw64/share/icons/AdwaitaLegacy "$dist/share/icons/"
-          cp -aL /mingw64/share/icons/hicolor "$dist/share/icons/"
-          cp -aL /mingw64/share/mime "$dist/share/"
-          cp -aL /mingw64/share/themes "$dist/share/"
+          cp -aL /ucrt64/etc/fonts "$dist/etc/"
+          cp -aL /ucrt64/etc/gtk-3.0 "$dist/etc/"
+          cp -aL /ucrt64/lib/gdk-pixbuf-2.0 "$dist/lib/"
+          cp -aL /ucrt64/lib/gtk-3.0 "$dist/lib/"
+          cp -aL /ucrt64/share/fontconfig "$dist/share/"
+          cp -aL /ucrt64/share/glib-2.0 "$dist/share/"
+          cp -aL /ucrt64/share/gtk-3.0 "$dist/share/"
+          cp -aL /ucrt64/share/icons/Adwaita "$dist/share/icons/"
+          cp -aL /ucrt64/share/icons/AdwaitaLegacy "$dist/share/icons/"
+          cp -aL /ucrt64/share/icons/hicolor "$dist/share/icons/"
+          cp -aL /ucrt64/share/mime "$dist/share/"
+          cp -aL /ucrt64/share/themes "$dist/share/"
 
           # Generate relocatable module caches explicitly.  The Windows GTK3
           # package currently has no external input-method DLLs, so its pacman
           # hook does not create immodules.cache on a fresh installation.
-          /mingw64/bin/gdk-pixbuf-query-loaders.exe \
+          /ucrt64/bin/gdk-pixbuf-query-loaders.exe \
             | tr -d '\r' \
             > "$dist/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
-          /mingw64/bin/gtk-query-immodules-3.0.exe \
+          /ucrt64/bin/gtk-query-immodules-3.0.exe \
             | tr -d '\r' \
             > "$dist/lib/gtk-3.0/3.0.0/immodules.cache"
 
           # Rebuild every other package-hook-generated cache in the staged
           # tree instead of relying on the state of the MSYS2 installation.
-          /mingw64/bin/glib-compile-schemas.exe \
+          /ucrt64/bin/glib-compile-schemas.exe \
             "$dist/share/glib-2.0/schemas"
           for icon_theme in Adwaita AdwaitaLegacy hicolor; do
-            /mingw64/bin/gtk-update-icon-cache.exe -f -q \
+            /ucrt64/bin/gtk-update-icon-cache.exe -f -q \
               "$dist/share/icons/$icon_theme"
           done
-          /mingw64/bin/update-mime-database.exe "$dist/share/mime"
+          /ucrt64/bin/update-mime-database.exe "$dist/share/mime"
 
           # Copy MinGW runtime DLLs and their transitive dependencies.
           declare -A seen=()
@@ -739,7 +739,7 @@ jobs:
               fi
               seen["$key"]=1
 
-              source_dll="/mingw64/bin/$dll"
+              source_dll="/ucrt64/bin/$dll"
               if [[ -f "$source_dll" ]]; then
                 install -m 0755 "$source_dll" "$dist/$dll"
                 queue+=("$source_dll")
@@ -793,14 +793,14 @@ jobs:
             echo "GDK Pixbuf loader cache contains no loader entries" >&2
             exit 1
           fi
-          if grep -Eiq '(^|")([a-z]:[\\/]|/mingw64/)' \
+          if grep -Eiq '(^|")([a-z]:[\\/]|/ucrt64/)' \
             "$dist/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" \
             "$dist/lib/gtk-3.0/3.0.0/immodules.cache"; then
             echo "GTK module cache contains an absolute MSYS2 path" >&2
             exit 1
           fi
 
-          # Run both staged executables without the MSYS2 MinGW bin directory.
+          # Run both staged executables without the MSYS2 UCRT64 bin directory.
           runtime_path="$dist:/c/Windows/System32:/c/Windows"
           if ! PATH="$runtime_path" \
             "$dist/qemu-system-ia64.exe" --version; then

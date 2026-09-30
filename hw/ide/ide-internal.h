@@ -441,6 +441,7 @@ void ide_cancel_dma_sync(IDEState *s);
 
 /* hw/ide/atapi.c */
 void ide_atapi_cmd(IDEState *s);
+void ide_atapi_cmd_complete_timer(void *opaque);
 void ide_atapi_cmd_reply_end(IDEState *s);
 
 int ide_handle_rw_error(IDEState *s, int error, int op);

@@ -195,8 +195,8 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int reg)
         if (ar != 17 && (ar != 18 || val != env->ar_bspstore)) {
             /*
              * AR.BSP is derived and read-only.  Reapplying the current
-             * BSPSTORE would needlessly invalidate the RSE clean partition,
-             * which makes a GDB g/G register echo non-idempotent.
+             * BSPSTORE is not inert: it makes RNAT undefined and discards
+             * cached backing-store state.  A GDB g/G echo must bypass it.
              */
             ia64_system_write_ar(env, ar, val);
         }

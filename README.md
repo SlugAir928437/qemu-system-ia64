@@ -50,6 +50,7 @@ Select a machine explicitly with `-machine`.
 | Machine | Default CPU | Max sockets | Max total cores / threads | Default VGA | Default RAM |
 | --- | --- | ---: | ---: | --- | ---: |
 | `hp-i2000` | `merced-800` | 2 | 2 | NVIDIA Quadro2 Pro | 2 GiB |
+| `hp-zx2000` | `mckinley-900` | 1 | 1 | ATI Radeon RV100 | 1 GiB |
 | `hp-zx6000` | `madison-1500` | 2 | 2 | ATI Radeon RV100 | 2 GiB |
 | `hp-rx2660` | `montecito-9010` | 2 | 9010/9110n: 2 / 2; others: 4 / 8 | ATI RN50 | 8 GiB |
 | `itanium2-vpc` | `montecito-9050` | 64 | 64 | ATI Rage 128 Pro | 2 GiB |
@@ -116,11 +117,6 @@ from the other values. Use `-accel tcg,thread=multi` for more than one vCPU.
 Instruction emulation, privileged behavior, floating-point handling,
 and device support remain experimental.
 
-## Related projects
-
-- [IA-64 ATI XPDM driver](https://github.com/syunnPC/qemu-system-ia64-ati-xpdm)
-- [IA-64 NVIDIA XPDM driver](https://github.com/syunnPC/qemu-system-ia64-nv-xpdm)
-
 ## Screenshots
 
 <table align="center">
@@ -153,6 +149,22 @@ and device support remain experimental.
         width="100%"
         alt="Debian 7.11.0 with GUI"
         src="https://github.com/user-attachments/assets/d1e5cdaa-64d6-4f91-9215-277423e268a2"
+      />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img 
+        width="100%"
+        alt="Ubuntu Server 9 with GUI"
+        src="https://github.com/user-attachments/assets/025938de-6e40-4bc9-ac16-1c124b3bd5f3"
+      />
+    </td>
+    <td width="100%">
+     <img 
+       width="100%"
+       alt="IBM AIX 5.1 IA-64 startup"
+       src="https://github.com/user-attachments/assets/e2eadc51-ffbf-4948-9453-d084a2e889ac"
       />
     </td>
   </tr>
