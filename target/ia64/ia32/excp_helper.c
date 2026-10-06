@@ -480,7 +480,13 @@ G_NORETURN void helper_raise_interrupt(CPUX86State *xenv, int vector,
                                        int next_eip_addend)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
-    bool int3 = vector & IA64_IA32_INT_BREAKPOINT;
+    /*
+     * INT n passes its immediate sign-extended (the decoder's "I,b"), so
+     * INT 80h-FFh arrive negative with bit 8 set: only exactly the INT3
+     * marker selects the IA-32 exception vector; every INT n is an
+     * IA-32 interrupt.
+     */
+    bool int3 = (vector & ~0xff) == IA64_IA32_INT_BREAKPOINT;
     uint32_t fault_ip = ia64_ia32_virtual_ip(env);
     uint32_t next_ip = fault_ip + next_eip_addend;
     uint32_t code = ia32_trap_code(env);

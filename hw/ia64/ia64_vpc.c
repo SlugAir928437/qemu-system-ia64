@@ -2925,8 +2925,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
         if (usb_bus == NULL) {
             return false;
         }
-        usb_create_simple(usb_bus, "usb-kbd");
-        usb_create_simple(usb_bus, "usb-tablet");
+        usb_create_default_input(usb_bus, "usb-kbd");
+        usb_create_default_input(usb_bus, "usb-tablet");
     }
 
     s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);

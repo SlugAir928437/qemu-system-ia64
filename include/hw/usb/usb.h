@@ -593,4 +593,10 @@ static inline USBDevice *usb_create_simple(USBBus *bus, const char *name)
     return dev;
 }
 
+/*
+ * Create a board-default usb-kbd, usb-mouse, or usb-tablet, honoring input
+ * overrides. The caller decides whether defaults and USB are enabled.
+ */
+void usb_create_default_input(USBBus *bus, const char *name);
+
 #endif

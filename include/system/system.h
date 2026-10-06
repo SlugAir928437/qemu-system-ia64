@@ -107,6 +107,8 @@ void qemu_register_boot_set(QEMUBootSetHandler *func, void *opaque);
 void qemu_boot_set(const char *boot_order, Error **errp);
 
 bool defaults_enabled(void);
+extern bool force_ps2_input;
+extern bool use_usb_mouse_instead_of_tablet;
 
 void qemu_init(int argc, char **argv);
 int qemu_main_loop(void);

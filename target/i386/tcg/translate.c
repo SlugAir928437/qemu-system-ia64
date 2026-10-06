@@ -772,7 +772,12 @@ static void gen_lea_v_seg_dest(DisasContext *s, MemOp aflag, TCGv dest, TCGv a0,
     }
     s->mem_seg = ovr_seg;
 
-    has_base = ovr_seg >= R_FS || (ovr_seg >= 0 && ADDSEG(s));
+    /*
+     * Without ADDSEG the bases of DS, ES and SS are known to be zero, but
+     * not that of CS: a CS override outside 64-bit mode adds it.
+     */
+    has_base = ovr_seg >= R_FS || (ovr_seg >= 0 && ADDSEG(s)) ||
+               (ovr_seg == R_CS && !CODE64(s));
     easize = CODE64(s) ? MO_64 : MO_32;
 
     if (has_base) {

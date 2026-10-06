@@ -1621,8 +1621,8 @@ static bool hp_rx2660_create_pci_devices(HPZX6000MachineState *s,
             pci_set_byte(s->ohci[function]->config + PCI_REVISION_ID, 0x41);
         }
         if (defaults_enabled()) {
-            usb_create_simple(USB_BUS(usb_bus), "usb-kbd");
-            usb_create_simple(USB_BUS(usb_bus), "usb-tablet");
+            usb_create_default_input(USB_BUS(usb_bus), "usb-kbd");
+            usb_create_default_input(USB_BUS(usb_bus), "usb-tablet");
         }
     }
 
@@ -1812,8 +1812,8 @@ static bool hp_zx_create_usb(HPZX6000MachineState *s, Error **errp)
             pci_set_byte(s->ohci[function]->config + PCI_REVISION_ID, 0x41);
         }
         if (defaults_enabled()) {
-            usb_create_simple(USB_BUS(usb_bus), "usb-kbd");
-            usb_create_simple(USB_BUS(usb_bus), "usb-tablet");
+            usb_create_default_input(USB_BUS(usb_bus), "usb-kbd");
+            usb_create_default_input(USB_BUS(usb_bus), "usb-tablet");
         }
     }
     return true;

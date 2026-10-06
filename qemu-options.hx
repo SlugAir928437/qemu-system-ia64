@@ -2141,6 +2141,48 @@ DEFHEADING()
 
 DEFHEADING(USB convenience options:)
 
+DEF("force-ps2-input", 0, QEMU_OPTION_force_ps2_input,
+    "-force-ps2-input\n"
+    "                use PS/2 input instead of default USB input\n",
+    QEMU_ARCH_ALL)
+SRST
+``-force-ps2-input``
+    Use the keyboard and mouse attached to an enabled PS/2 controller,
+    such as i8042, instead of automatically creating USB input devices.
+    The machine must provide both a PS/2 keyboard and a PS/2 mouse;
+    otherwise QEMU reports an error. Controllers explicitly added with
+    ``-device`` also satisfy this requirement. This option does not
+    enable a disabled PS/2 controller.
+
+    This takes precedence over ``-use-usb-mouse-instead-of-tablet``.
+    Explicitly requested USB devices, for example via ``-device`` or
+    ``-usbdevice``, are unaffected.
+ERST
+
+DEF("use-usb-mouse-instead-of-tablet", 0,
+    QEMU_OPTION_use_usb_mouse_instead_of_tablet,
+    "-use-usb-mouse-instead-of-tablet\n"
+    "                use a USB mouse instead of the default USB tablet\n",
+    QEMU_ARCH_ALL)
+SRST
+``-use-usb-mouse-instead-of-tablet``
+    When the machine automatically creates a USB tablet, create a USB
+    mouse instead. The default USB keyboard is still created. The USB
+    mouse provides relative pointer input instead of absolute tablet
+    coordinates.
+
+    Graphical frontends need to capture the pointer for relative input.
+    With GTK, click the guest display or use the Grab Input menu item
+    (Ctrl-Alt-G) to capture it. For reliable pointer capture with GTK
+    on a Wayland desktop that also provides XWayland, start QEMU with
+    ``GDK_BACKEND=x11``.
+
+    This option only changes automatically created input devices and
+    does not enable USB or override ``-nodefaults``. Explicitly requested
+    USB devices, for example via ``-device`` or ``-usbdevice``, are
+    unaffected.
+ERST
+
 DEF("usb", 0, QEMU_OPTION_usb,
     "-usb            enable on-board USB host controller (if not enabled by default)\n",
     QEMU_ARCH_ALL)

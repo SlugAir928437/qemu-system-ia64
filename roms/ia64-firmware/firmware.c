@@ -2041,7 +2041,13 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
 #define PLATFORM_TABLE_DEBUG_IMAGE   5
 #define PLATFORM_TABLE_INITIAL       6
 #define PLATFORM_TABLE_MAX           16
-#define LOADED_IMAGE_MAX             8
+/*
+ * Loaded images, and with them the StartImage nesting depth.  Real EFI keeps
+ * image records in pool memory, limited only by memory; image handles point
+ * into this table, so it stays fixed but is sized like a firmware that has
+ * dozens of drivers and applications loaded at once.
+ */
+#define LOADED_IMAGE_MAX             128
 #define SMBIOS_TABLE_MAX_SIZE        8192U
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
 static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;

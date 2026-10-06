@@ -15,11 +15,10 @@ void helper_ia32_rsm(CPUIA64State *env);
 void helper_ia32_rdtsc(CPUIA64State *env);
 void helper_ia32_rdpmc(CPUIA64State *env);
 
-static G_NORETURN void ia32_instruction_intercept(CPUX86State *xenv)
-{
-    ia64_ia32_raise_intercept(xenv, IA64_IA32_INTERCEPT_INSTRUCTION,
-                              0, GETPC());
-}
+/* A macro, so that GETPC() is the helper's own return into translated code. */
+#define ia32_instruction_intercept(xenv)                              \
+    ia64_ia32_raise_intercept((xenv), IA64_IA32_INTERCEPT_INSTRUCTION, \
+                              0, GETPC())
 
 static uint64_t ia32_io_address(CPUIA64State *env, uint32_t port)
 {
@@ -80,12 +79,16 @@ static uint16_t ia32_tss_lduw(CPUX86State *xenv, uint32_t addr,
     return cpu_lduw_le_mmuidx_ra(env, addr, mmu_idx, retaddr);
 }
 
+/*
+ * RETADDR is the helper's GETPC(): taken here, in a function the helper
+ * calls, it would not lead back into the translated code, and a fault would
+ * leave EIP at an earlier instruction.
+ */
 static uint32_t ia32_io_read(CPUX86State *xenv, uint32_t port,
-                             unsigned size)
+                             unsigned size, uintptr_t retaddr)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
     CPUState *cs = env_cpu(env);
-    uintptr_t retaddr = GETPC();
     uint64_t addr;
     int mmu_idx;
 
@@ -119,11 +122,10 @@ static uint32_t ia32_io_read(CPUX86State *xenv, uint32_t port,
 }
 
 static void ia32_io_write(CPUX86State *xenv, uint32_t port,
-                          uint32_t value, unsigned size)
+                          uint32_t value, unsigned size, uintptr_t retaddr)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
     CPUState *cs = env_cpu(env);
-    uintptr_t retaddr = GETPC();
     uint64_t addr;
     int mmu_idx;
 
@@ -160,32 +162,32 @@ static void ia32_io_write(CPUX86State *xenv, uint32_t port,
 
 void helper_outb(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 1);
+    ia32_io_write(xenv, port, value, 1, GETPC());
 }
 
 target_ulong helper_inb(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 1);
+    return ia32_io_read(xenv, port, 1, GETPC());
 }
 
 void helper_outw(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 2);
+    ia32_io_write(xenv, port, value, 2, GETPC());
 }
 
 target_ulong helper_inw(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 2);
+    return ia32_io_read(xenv, port, 2, GETPC());
 }
 
 void helper_outl(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 4);
+    ia32_io_write(xenv, port, value, 4, GETPC());
 }
 
 target_ulong helper_inl(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 4);
+    return ia32_io_read(xenv, port, 4, GETPC());
 }
 
 void helper_check_io(CPUX86State *xenv, uint32_t port, uint32_t size)

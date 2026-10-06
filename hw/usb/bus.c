@@ -52,6 +52,20 @@ static const TypeInfo usb_bus_info = {
 static int next_usb_bus = 0;
 static QTAILQ_HEAD(, USBBus) busses = QTAILQ_HEAD_INITIALIZER(busses);
 
+void usb_create_default_input(USBBus *bus, const char *name)
+{
+    assert(!strcmp(name, "usb-kbd") || !strcmp(name, "usb-mouse") ||
+           !strcmp(name, "usb-tablet"));
+
+    if (force_ps2_input) {
+        return;
+    }
+    if (use_usb_mouse_instead_of_tablet && !strcmp(name, "usb-tablet")) {
+        name = "usb-mouse";
+    }
+    usb_create_simple(bus, name);
+}
+
 static int usb_device_post_load(void *opaque, int version_id)
 {
     USBDevice *dev = opaque;

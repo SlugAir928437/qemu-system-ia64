@@ -54,6 +54,7 @@
 #include "qemu/async-teardown.h"
 #include "qemu/exit-with-parent.h"
 #include "hw/usb/usb.h"
+#include "hw/input/ps2.h"
 #include "hw/isa/isa.h"
 #include "hw/scsi/scsi.h"
 #include "hw/sd/sd.h"
@@ -195,6 +196,8 @@ static const char *qtest_chrdev;
 static const char *qtest_log;
 
 static int has_defaults = 1;
+bool force_ps2_input;
+bool use_usb_mouse_instead_of_tablet;
 static int default_audio = 1;
 static int default_serial = 1;
 static int default_parallel = 1;
@@ -2825,6 +2828,21 @@ static void qemu_init_displays(void)
     }
 }
 
+static int qemu_find_ps2_input(Object *obj, void *opaque)
+{
+    unsigned *devices = opaque;
+
+    if (object_dynamic_cast(obj, TYPE_PS2_KBD_DEVICE) &&
+        DEVICE(obj)->realized) {
+        *devices |= 1;
+    }
+    if (object_dynamic_cast(obj, TYPE_PS2_MOUSE_DEVICE) &&
+        DEVICE(obj)->realized) {
+        *devices |= 2;
+    }
+    return *devices == 3;
+}
+
 static void qemu_init_board(void)
 {
     MachineClass *machine_class = MACHINE_GET_CLASS(current_machine);
@@ -2883,6 +2901,20 @@ static void qemu_create_cli_devices(void)
 static bool qemu_machine_creation_done(Error **errp)
 {
     MachineState *machine = MACHINE(qdev_get_machine());
+
+    if (force_ps2_input) {
+        unsigned devices = 0;
+
+        /* Include PS/2 controllers added with -device in the check. */
+        object_child_foreach_recursive(OBJECT(machine),
+                                       qemu_find_ps2_input, &devices);
+        if (devices != 3) {
+            error_setg(errp,
+                       "-force-ps2-input requires an enabled PS/2 controller "
+                       "with a keyboard and mouse");
+            return false;
+        }
+    }
 
     /* Did we create any drives that we failed to create a device for? */
     drive_check_orphaned();
@@ -3562,6 +3594,12 @@ void qemu_init(int argc, char **argv)
                 break;
             case QEMU_OPTION_usb:
                 qdict_put_str(machine_opts_dict, "usb", "on");
+                break;
+            case QEMU_OPTION_force_ps2_input:
+                force_ps2_input = true;
+                break;
+            case QEMU_OPTION_use_usb_mouse_instead_of_tablet:
+                use_usb_mouse_instead_of_tablet = true;
                 break;
             case QEMU_OPTION_usbdevice:
                 qdict_put_str(machine_opts_dict, "usb", "on");

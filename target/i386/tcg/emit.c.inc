@@ -3147,10 +3147,14 @@ static void gen_PMOVMSKB(DisasContext *s, X86DecodedInsn *decode)
 static void gen_POP(DisasContext *s, X86DecodedInsn *decode)
 {
     X86DecodedOp *op = &decode->op[0];
+    /* The segment of a memory destination; reading the stack sets SS. */
+    int mem_seg = s->mem_seg;
     MemOp ot = gen_pop_T0(s);
 
     assert(ot >= op->ot);
     if (op->has_ea || op->unit == X86_OP_SEG) {
+        /* The store is checked against the destination's own segment. */
+        s->mem_seg = mem_seg;
         /* NOTE: order is important for MMU exceptions */
         gen_writeback(s, decode, 0, s->T0);
     }

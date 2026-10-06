@@ -1039,8 +1039,8 @@ static bool hp_i2000_create_pci_devices(HPI2000MachineState *s,
                        TYPE_INTEL_82468GX_IFB_USB);
             return false;
         }
-        usb_create_simple(USB_BUS(usb_bus), "usb-kbd");
-        usb_create_simple(USB_BUS(usb_bus), "usb-tablet");
+        usb_create_default_input(USB_BUS(usb_bus), "usb-kbd");
+        usb_create_default_input(USB_BUS(usb_bus), "usb-tablet");
     }
     if (!hp_i2000_create_isa_devices(s, errp)) {
         return false;
