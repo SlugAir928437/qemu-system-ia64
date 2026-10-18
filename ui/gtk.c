@@ -967,16 +967,11 @@ static void gd_click_pressed(GtkGestureClick *gesture,
     device = gtk_gesture_get_device(GTK_GESTURE(gesture));
     source = device ? gdk_device_get_source(device) : GDK_SOURCE_MOUSE;
 
-    if (source == GDK_SOURCE_TOUCHSCREEN) {
-#ifdef __LIMBO__
-        /* Android: the touchscreen is the only pointer device.  Guests
-         * without a touchscreen (Windows, GRUB, ...) ignore multi-touch
-         * events, so treat a tap as a normal mouse click instead. */
-#else
+    if (source == GDK_SOURCE_TOUCHSCREEN &&
+        qemu_input_is_multitouch(vc->gfx.dcl.con)) {
         vc->gfx.touch_active = true;
         gd_touch_handle(vc, INPUT_MULTI_TOUCH_TYPE_BEGIN, x, y);
         return;
-#endif
     }
 
     /* implicitly grab the input at the first click in the relative mode */
@@ -1007,12 +1002,10 @@ static void gd_click_released(GtkGestureClick *gesture,
     device = gtk_gesture_get_device(GTK_GESTURE(gesture));
     source = device ? gdk_device_get_source(device) : GDK_SOURCE_MOUSE;
 
-    if (source == GDK_SOURCE_TOUCHSCREEN) {
-#ifndef __LIMBO__
+    if (source == GDK_SOURCE_TOUCHSCREEN && vc->gfx.touch_active) {
         vc->gfx.touch_active = false;
         gd_touch_handle(vc, INPUT_MULTI_TOUCH_TYPE_END, x, y);
         return;
-#endif
     }
 
     if (n_press > 1) {
