@@ -1923,6 +1923,10 @@ static GSList *gd_vc_vte_init(GtkDisplayState *s, VirtualConsole *vc,
     gtk_box_append(GTK_BOX(box), scrollbar);
 
     vc->vte.box = box;
+    gtk_widget_set_hexpand(box, TRUE);
+    gtk_widget_set_vexpand(box, TRUE);
+    gtk_widget_set_hexpand(vc->vte.terminal, TRUE);
+    gtk_widget_set_vexpand(vc->vte.terminal, TRUE);
     vc->vte.scrollbar = scrollbar;
 
     g_signal_connect(vadjustment, "changed",
@@ -2190,6 +2194,8 @@ static void gd_vc_gfx_init(GtkDisplayState *s, VirtualConsole *vc,
     }
 
     gtk_widget_set_can_focus(vc->gfx.drawing_area, TRUE);
+    gtk_widget_set_hexpand(vc->gfx.drawing_area, TRUE);
+    gtk_widget_set_vexpand(vc->gfx.drawing_area, TRUE);
 
     vc->type = GD_VC_GFX;
     vc->tab_item = vc->gfx.drawing_area;
@@ -2413,6 +2419,8 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
     gd_update_caption(s);
 
     gtk_widget_insert_action_group(s->window, "gtk", s->actions);
+    gtk_widget_set_hexpand(s->notebook, TRUE);
+    gtk_widget_set_vexpand(s->notebook, TRUE);
     gtk_box_append(GTK_BOX(s->vbox), s->menu_bar);
     gtk_box_append(GTK_BOX(s->vbox), s->notebook);
 
