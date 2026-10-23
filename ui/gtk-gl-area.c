@@ -56,7 +56,7 @@ void gd_gl_area_draw(VirtualConsole *vc)
     int fbw, fbh;
     int wx_offset, wy_offset;
 
-    if (!vc->gfx.gls || !vc->gfx.ds) {
+    if (!vc->gfx.gls || !vc->gfx.ds || !vc->gfx.drawing_area) {
         return;
     }
 
@@ -189,7 +189,7 @@ void gd_gl_area_update(DisplayChangeListener *dcl,
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
 
-    if (!vc->gfx.gls || !vc->gfx.ds) {
+    if (!vc->gfx.gls || !vc->gfx.ds || !vc->gfx.drawing_area) {
         return;
     }
 
@@ -202,8 +202,16 @@ void gd_gl_area_update(DisplayChangeListener *dcl,
 void gd_gl_area_refresh(DisplayChangeListener *dcl)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
+    GtkWidget *widget = vc->window ? vc->window : vc->gfx.drawing_area;
 
-    gd_update_monitor_refresh_rate(vc, vc->window ? vc->window : vc->gfx.drawing_area);
+    if (!widget) {
+        /* Android already destroyed the activity / GTK window while the VM
+         * keeps running; the display listener is normally unregistered by
+         * gd_window_destroy(), this is just a last-resort guard. */
+        return;
+    }
+
+    gd_update_monitor_refresh_rate(vc, widget);
 
     if (vc->gfx.guest_fb.dmabuf &&
         qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {

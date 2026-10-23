@@ -150,7 +150,12 @@ static bool gd_grab_on_hover(GtkDisplayState *s)
 
 static GdkSurface *gd_widget_surface(GtkWidget *widget)
 {
-    GtkNative *native = gtk_widget_get_native(widget);
+    GtkNative *native;
+
+    if (!widget) {
+        return NULL;
+    }
+    native = gtk_widget_get_native(widget);
 
     return native ? gtk_native_get_surface(native) : NULL;
 }
@@ -632,6 +637,29 @@ static gboolean gd_window_close(GtkWidget *widget, void *opaque)
     }
 
     return TRUE;
+}
+
+/*
+ * Android can destroy the activity (and with it the GTK window and all of its
+ * widgets) while the VM keeps running in the machine service.  QEMU's display
+ * refresh timer would then call into the already finalized widgets and crash
+ * inside gtk_widget_get_native().  Unregister the display change listeners so
+ * that no display callback can run after the window is gone; the weak pointers
+ * installed next to the window creation also null out the stale widget
+ * pointers.
+ */
+static void gd_window_destroy(GtkWidget *widget, void *opaque)
+{
+    GtkDisplayState *s = opaque;
+    int i;
+
+    for (i = 0; i < s->nb_vcs; i++) {
+        VirtualConsole *vc = &s->vc[i];
+
+        if (vc->gfx.dcl.con) {
+            unregister_displaychangelistener(&vc->gfx.dcl);
+        }
+    }
 }
 
 static void gd_set_ui_refresh_rate(VirtualConsole *vc, int refresh_rate)
@@ -1416,6 +1444,7 @@ static void gd_menu_untabify(GtkDisplayState *s)
 
         g_signal_connect(vc->window, "close-request",
                          G_CALLBACK(gd_tab_window_close), vc);
+        g_object_add_weak_pointer(G_OBJECT(vc->window), (gpointer *)&vc->window);
         gtk_widget_set_visible(vc->window, true);
 
         if (qemu_console_is_graphic(vc->gfx.dcl.con)) {
@@ -2195,6 +2224,10 @@ static void gd_vc_gfx_init(GtkDisplayState *s, VirtualConsole *vc,
     }
 
     gtk_widget_set_can_focus(vc->gfx.drawing_area, TRUE);
+    /* Clear the pointer automatically if the widget is destroyed while the
+     * VM keeps running (Android tears the window down independently). */
+    g_object_add_weak_pointer(G_OBJECT(vc->gfx.drawing_area),
+                              (gpointer *)&vc->gfx.drawing_area);
     gtk_widget_set_hexpand(vc->gfx.drawing_area, TRUE);
     gtk_widget_set_vexpand(vc->gfx.drawing_area, TRUE);
 
@@ -2411,6 +2444,9 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
 
     g_signal_connect(s->window, "close-request",
                      G_CALLBACK(gd_window_close), s);
+    g_signal_connect(s->window, "destroy",
+                     G_CALLBACK(gd_window_destroy), s);
+    g_object_add_weak_pointer(G_OBJECT(s->window), (gpointer *)&s->window);
     g_signal_connect(s->notebook, "switch-page",
                      G_CALLBACK(gd_change_page), s);
 
