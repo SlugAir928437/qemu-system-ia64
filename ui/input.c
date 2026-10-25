@@ -467,6 +467,11 @@ bool qemu_input_is_absolute(QemuConsole *con)
     return (s != NULL) && (s->handler->mask & INPUT_EVENT_MASK_ABS);
 }
 
+bool qemu_input_is_multitouch(QemuConsole *con)
+{
+    return qemu_input_find_handler(INPUT_EVENT_MASK_MTT, con) != NULL;
+}
+
 int qemu_input_scale_axis(int value,
                           int min_in, int max_in,
                           int min_out, int max_out)
